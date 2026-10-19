@@ -73,8 +73,10 @@ def main() -> int:
         if not rich or not rich.queues or not rich.types:
             print("\n--write: RiCH has no queues or types here; nothing to route to.")
             return 2
-        type_name, subtypes = next((k, v) for k, v in rich.types.items() if v)
-        sub = subtypes[0]
+        # A subtype with its reason, as the agent will pick: their screen
+        # expects the reason from the catalog.
+        pairs = [(k, s) for k, v in rich.types.items() for s in v]
+        type_name, sub = next(((k, s) for k, s in pairs if s.reason), pairs[0])
         print(f"\nRouting {t.number} to {rich.name} / {rich.queues[0]} / {type_name} / {sub.name}")
         r = t2.update(t.id, product=rich.name, queue=rich.queues[0], type=type_name,
                       subtype=sub.name, conclusions=sub.reason,
