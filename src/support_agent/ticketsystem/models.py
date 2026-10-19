@@ -1,0 +1,163 @@
+"""What the T2 Ticketing System's TicketAPI returns, as plain objects.
+
+Built from its JSON in one place (client.py), so nothing else in the agent
+reads their field names. Times are timezone-aware; IDs are lower case.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime
+
+CLOSED_STATE_TYPES = ("closed", "merged")
+
+
+@dataclass(frozen=True)
+class Attachment:
+    id: str
+    filename: str
+    content_type: str
+    size: int | None
+    url: str
+
+
+@dataclass(frozen=True)
+class Article:
+    id: str
+    number: int
+    from_customer: bool
+    via_email: bool
+    visible: bool
+    """False for an internal note."""
+    sender: str
+    to: str
+    cc: str
+    subject: str
+    body: str
+    created: datetime | None
+    message_id: str
+    attachments: tuple[Attachment, ...] = ()
+
+    @property
+    def is_description(self) -> bool:
+        """The ticket's description, which TicketGet lists as the first
+        article when no message holds the same text (a ticket created on
+        their screen without emailing the customer). It has no real ID."""
+        return self.id.startswith("description-")
+
+
+@dataclass(frozen=True)
+class HistoryEntry:
+    at: datetime | None
+    action: str
+    """Their wording: "Reassigned", "Status Changed", "Product Changed",
+    "Priority Changed", "Internal Note Added", "Reply Added" ..."""
+    details: str
+    by: str
+    from_queue: str = ""
+    to_queue: str = ""
+    from_state: str = ""
+    to_state: str = ""
+    reason: str = ""
+    """The justification written when a person reassigned the ticket."""
+    team: str = ""
+    """The responsible team named in that justification."""
+
+    @property
+    def is_queue_move(self) -> bool:
+        return bool(self.to_queue)
+
+
+@dataclass(frozen=True)
+class Ticket:
+    id: str
+    number: str
+    title: str
+    product: str
+    product_code: str
+    queue: str
+    state: str
+    state_type: str
+    type: str
+    priority: str
+    sla: str
+    subtype: str
+    conclusions: str
+    requires_classification: bool
+    customer_id: str
+    customer_email: str
+    customer_status: str
+    """Pending, Active or Blocked."""
+    customer_org: str
+    customer_tier: str
+    is_vip: bool
+    created: datetime | None
+    changed: datetime | None
+    dynamic_fields: dict[str, str] = field(default_factory=dict)
+    articles: tuple[Article, ...] = ()
+    history: tuple[HistoryEntry, ...] = ()
+
+    @property
+    def is_closed(self) -> bool:
+        return self.state_type in CLOSED_STATE_TYPES
+
+    @property
+    def first_article(self) -> Article | None:
+        return self.articles[0] if self.articles else None
+
+    @property
+    def queue_moves(self) -> list[HistoryEntry]:
+        return [h for h in self.history if h.is_queue_move]
+
+
+@dataclass(frozen=True)
+class Subtype:
+    name: str
+    reason: str | None = None
+    """The text their screen expects in Conclusions for this subtype. None
+    until TicketLookupsGet returns it per subtype."""
+
+
+@dataclass(frozen=True)
+class ProductValues:
+    name: str
+    code: str
+    queues: tuple[str, ...]
+    types: dict[str, tuple[Subtype, ...]]
+    reasons: tuple[str, ...]
+    """Every reason for the product, not linked to a subtype."""
+    slas: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class Lookups:
+    products: tuple[ProductValues, ...]
+    statuses: tuple[tuple[str, bool], ...]
+    """(name, closed) in their order."""
+    priorities: tuple[str, ...]
+
+    def product(self, name_or_code: str) -> ProductValues | None:
+        key = name_or_code.strip().lower()
+        for p in self.products:
+            if key in (p.name.lower(), p.code.lower()):
+                return p
+        return None
+
+
+@dataclass(frozen=True)
+class Note:
+    """An article the agent adds to a ticket."""
+
+    subject: str
+    body: str
+    visible: bool = False
+    """False: an internal note, which staff see and the customer does not.
+    True stores a reply on the ticket but does NOT email it: the API does not
+    send email yet."""
+
+
+@dataclass(frozen=True)
+class WriteResult:
+    ticket_id: str
+    number: str
+    article_id: str | None
