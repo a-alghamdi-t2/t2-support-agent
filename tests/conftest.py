@@ -17,6 +17,23 @@ import pytest
 import fake_t2 as fake
 
 
+@pytest.fixture(autouse=True)
+def no_dotenv(monkeypatch):
+    """Tests never read the .env of the machine they run on: a developer's
+    own settings (a password set there, say) must not change the results."""
+    from support_agent import config
+
+    monkeypatch.setitem(config.Settings.model_config, "env_file", None)
+    for name in ("T2_BASE_URL", "T2_USER", "T2_PASSWORD", "GROQ_API_KEY", "SESSION_SECRET",
+                 "API_KEY", "MAIL_PASSWORD", "DRY_RUN"):
+        monkeypatch.delenv(name, raising=False)
+    config.env_settings.cache_clear()
+    config.refresh_settings()
+    yield
+    config.env_settings.cache_clear()
+    config.refresh_settings()
+
+
 @pytest.fixture(scope="session")
 def database_url():
     admin = os.environ.get("TEST_DATABASE_URL")
@@ -43,7 +60,6 @@ def db(database_url, monkeypatch):
     from support_agent.db import migrate, postgres
 
     monkeypatch.setenv("DATABASE_URL", database_url)
-    monkeypatch.setenv("SESSION_SECRET", "x" * 40)
     config.env_settings.cache_clear()
     config.refresh_settings()
     postgres.close_pool()

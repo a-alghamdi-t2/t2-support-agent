@@ -8,12 +8,17 @@ Two kinds of field below. The first block mirrors .env one for one. The second
 holds values code reads but nobody sets per environment; adding the variable to
 .env overrides any of them.
 
-Most of these can also be set on the console's Settings page, which only a
-super admin (SUPER_ADMIN_EMAILS) sees. A value saved there is kept in the
-database and wins over .env; what the page cannot change -- the database, the
-session secret, the super admins themselves -- stays in .env. get_settings()
+Most of these can also be changed on our console's Settings page, which only
+our own team sees. A value saved there is kept in the database (passwords and
+keys encrypted) and wins over .env; what the page cannot change -- the
+database, the session secret, API_KEY -- stays in .env. get_settings()
 returns the merged result; env_settings() returns .env alone, for what must be
 known before the database can be read. See support_agent.settings_store.
+
+Two kinds of people use the agent. Staff and admins of the T2 Ticketing
+System work in their own system; its server calls our API with API_KEY and
+names the person and what their role allows. Our own team signs in to our
+console, with accounts of its own (console_users).
 
 One deployment serves every product. All email reaches the T2 Ticketing System
 through one mailbox and lands in one intake (product "Unclassified Email");
@@ -70,8 +75,6 @@ class Settings(BaseSettings):
     """The junk index in Qdrant. Junk arrives through the same mailbox for
     every product, so there is one."""
 
-    session_cookie: str = "t2_agent_session"
-    """The sign-in cookie's name."""
 
     # ---- database ------------------------------------------------------
     database_url: SecretStr
@@ -101,13 +104,10 @@ class Settings(BaseSettings):
     mail_from: str | None = None
     mail_username: str | None = None
     mail_password: SecretStr | None = None
-    console_url: str | None = None
-    """Where the console is reached. When set, urgent emails link straight to
-    the draft."""
-
-    registration_allowlist: str | None = None
-    """Who may create a reviewer account: addresses and/or domains ("@t2.sa"),
-    comma-separated. Unset: only the first account, then sign-up is closed."""
+    ticket_url: str | None = None
+    """A ticket's page in the ticket system, with {id} for its ID, e.g.
+    https://ticketsystem.t2.sa/Tickets/Details/{id}. When set, urgent emails
+    and the weekly report link straight to the ticket."""
 
     # The weekly history update (support_agent.history.weekly): Friday 04:00, Riyadh.
     weekly_enabled: bool = True
@@ -167,13 +167,17 @@ class Settings(BaseSettings):
     it, the matches are what the search returns when nothing is really alike
     -- around 0.01 -- while related tickets have scored 0.15 and up."""
 
-    # ---- web -----------------------------------------------------------
+    # ---- our API ---------------------------------------------------------
+    api_key: SecretStr | None = None
+    """The key the ticket system's server sends to call our API. Unset: our
+    API refuses every call. Long and random; never sent to a browser."""
+
+    # ---- our console -----------------------------------------------------
     session_secret: SecretStr | None = None
-    super_admin_emails: str | None = None
-    """Comma-separated. These accounts are always admins, cannot be demoted or
-    switched off from the console, and are the only ones who see the Settings
-    page. The one setting about people that lives in .env: nobody can take it
-    away from the console."""
+    """Signs console sign-ins and encrypts the passwords saved on the Settings
+    page. Changing it signs everyone out, and saved passwords must be entered
+    again."""
+    session_cookie: str = "t2_agent_console"
 
     # ---- behaviour -----------------------------------------------------
     dry_run: bool = True
@@ -198,6 +202,8 @@ class Settings(BaseSettings):
     db_connect_timeout: int = 15
     db_pool_max: int = 5
 
+    session_hours: int = 12
+
     t2_timeout: int = 30
     t2_poll_seconds: int = 60
     t2_verify_tls: bool = True
@@ -219,8 +225,6 @@ class Settings(BaseSettings):
     sync opens every email ticket as Open."""
     intake_limit: int = 50
     """At most this many intake tickets per check."""
-
-    session_hours: int = 12
 
     timezone: str = "Asia/Riyadh"
     """The timezone the ticket system reports in. Its times are naive strings
@@ -288,10 +292,6 @@ class Settings(BaseSettings):
                 out[code.strip().upper()] = tenant.strip()
         return out
 
-    @property
-    def super_admin_list(self) -> list[str]:
-        return [e.lower() for e in self._split(self.super_admin_emails)]
-
     def product_dir(self, code: str) -> Path:
         """products/<code>, lower case: products/rich for RICH."""
         return self.products_dir / code.strip().lower()
@@ -358,7 +358,11 @@ class Settings(BaseSettings):
         if not self.t2_verify_tls:
             w.append("T2_VERIFY_TLS=false: the ticket system's certificate is not checked")
         if not self.session_secret:
-            w.append("SESSION_SECRET is unset; review sessions cannot be signed")
+            w.append("SESSION_SECRET is unset: nobody can sign in to the console")
+        if not self.api_key:
+            w.append("API_KEY is unset: the ticket system cannot call our API")
+        elif len(self.api_key.get_secret_value()) < 32:
+            w.append("API_KEY is shorter than 32 characters")
         if not self.prompts_dir.is_dir():
             w.append(f"No prompts at {self.prompts_dir}")
         for code in self.history_product_list:

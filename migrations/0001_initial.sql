@@ -14,59 +14,45 @@ $$;
 CREATE TYPE article_party AS ENUM ('request', 'other');
 CREATE TYPE doc_status    AS ENUM ('pending', 'indexed', 'failed');
 CREATE TYPE draft_action  AS ENUM ('answer', 'route');
-CREATE TYPE draft_status  AS ENUM ('pending', 'approved', 'rejected', 'superseded', 'not_ours');
+CREATE TYPE draft_status  AS ENUM ('pending', 'approved', 'rejected', 'superseded');
 CREATE TYPE reply_kind    AS ENUM ('answer', 'ask_more');
-CREATE TYPE review_outcome AS ENUM ('approve', 'edit', 'reject', 'not_ours');
+CREATE TYPE review_outcome AS ENUM ('approve', 'edit', 'reject');
 CREATE TYPE write_status  AS ENUM ('pending', 'sent', 'failed');
 
 
--- ── People ───────────────────────────────────────────────────────────────
+-- ── Who did what ─────────────────────────────────────────────────────────
+-- Two kinds of people, and every *_by column below is one of them by email:
+--   - staff and admins of the T2 Ticketing System, who sign in there. Its
+--     roles (AI Review, AI Admin) decide what they may do; its server calls
+--     our API on their behalf and names them.
+--   - our own team, who sign in to our console (below) to change the
+--     settings and look at the tables. Nobody in the ticket system sees it.
 
-CREATE TABLE reviewers (
+CREATE TABLE console_users (
     id            bigserial PRIMARY KEY,
-    email         text NOT NULL UNIQUE,
+    email         text NOT NULL UNIQUE CHECK (position('@' IN email) > 1),
     display_name  text,
     password_hash text NOT NULL,
     is_active     boolean NOT NULL DEFAULT true,
-    is_admin      boolean NOT NULL DEFAULT false,
-    permissions   text[] NOT NULL DEFAULT ARRAY['review', 'tables'],
     last_seen_at  timestamptz,
     created_at    timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE TABLE sessions (
-    token       text PRIMARY KEY,
-    reviewer_id bigint NOT NULL REFERENCES reviewers(id) ON DELETE CASCADE,
-    created_at  timestamptz NOT NULL DEFAULT now(),
-    expires_at  timestamptz NOT NULL,
-    last_seen   timestamptz NOT NULL DEFAULT now()
-);
-CREATE INDEX idx_sessions_expiry   ON sessions (expires_at);
-CREATE INDEX idx_sessions_reviewer ON sessions (reviewer_id);
-
-CREATE TABLE signup_codes (
-    email         text PRIMARY KEY,
-    code_hash     text NOT NULL,
-    password_hash text NOT NULL,
-    display_name  text,
-    attempts      integer NOT NULL DEFAULT 0,
-    expires_at    timestamptz NOT NULL,
-    created_at    timestamptz NOT NULL DEFAULT now()
-);
-
-CREATE TABLE reset_codes (
-    email      text PRIMARY KEY,
-    code_hash  text NOT NULL,
-    attempts   integer NOT NULL DEFAULT 0,
+CREATE TABLE console_sessions (
+    token      text PRIMARY KEY,
+    user_id    bigint NOT NULL REFERENCES console_users(id) ON DELETE CASCADE,
+    created_at timestamptz NOT NULL DEFAULT now(),
     expires_at timestamptz NOT NULL,
-    created_at timestamptz NOT NULL DEFAULT now()
+    last_seen  timestamptz NOT NULL DEFAULT now()
 );
+CREATE INDEX idx_console_sessions_expiry ON console_sessions (expires_at);
+CREATE INDEX idx_console_sessions_user   ON console_sessions (user_id);
 
 
 -- ── Settings and the agent's values ──────────────────────────────────────
 
--- Values a super admin set on the Settings page; they win over .env.
--- Passwords and keys are stored encrypted (secret = true).
+-- Settings changed on our console's Settings page; they win over .env.
+-- Passwords and keys are stored encrypted (secret = true) and never shown.
 CREATE TABLE app_settings (
     key        text PRIMARY KEY,
     value      text NOT NULL,
@@ -91,6 +77,8 @@ CREATE TABLE app_settings (
 -- first_seen_at / seen_at: a value is "New" on the Values page from when it
 --              first appeared until someone writes its description or marks
 --              it seen.
+-- position:    the ticket system's order (statuses and priorities have one;
+--              the rest come alphabetically).
 -- removed_at:  no longer in the ticket system. Not offered; the row and its
 --              description are kept in case it comes back.
 CREATE TABLE agent_options (
@@ -102,10 +90,11 @@ CREATE TABLE agent_options (
     description   text CHECK (description IS NULL OR length(btrim(description)) > 0),
     conclusion    text,
     hidden        boolean NOT NULL DEFAULT false,
+    "position"    integer NOT NULL DEFAULT 0,
     first_seen_at timestamptz NOT NULL DEFAULT now(),
     seen_at       timestamptz,
     removed_at    timestamptz,
-    updated_by    bigint REFERENCES reviewers(id),
+    updated_by    text,
     updated_at    timestamptz NOT NULL DEFAULT now(),
     CHECK (kind <> 'subtype' OR parent IS NOT NULL)
 );
@@ -120,7 +109,7 @@ CREATE TRIGGER agent_options_touch BEFORE UPDATE ON agent_options
 CREATE TABLE agent_option_kinds (
     kind       text PRIMARY KEY CHECK (kind IN ('product', 'queue', 'next_state', 'type', 'subtype', 'priority')),
     guidance   text NOT NULL CHECK (length(btrim(guidance)) > 0),
-    updated_by bigint REFERENCES reviewers(id),
+    updated_by text,
     updated_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE TRIGGER agent_option_kinds_touch BEFORE UPDATE ON agent_option_kinds
@@ -130,7 +119,7 @@ CREATE TABLE team_scopes (
     id          bigserial PRIMARY KEY,
     content     text NOT NULL CHECK (length(btrim(content)) > 0),
     filename    text,
-    uploaded_by bigint REFERENCES reviewers(id),
+    uploaded_by text,
     created_at  timestamptz NOT NULL DEFAULT now()
 );
 
@@ -139,7 +128,7 @@ CREATE TABLE documents (
     filename      text NOT NULL,
     content_hash  text NOT NULL UNIQUE,
     size_bytes    bigint,
-    uploaded_by   bigint NOT NULL REFERENCES reviewers(id),
+    uploaded_by   text NOT NULL,
     status        doc_status NOT NULL DEFAULT 'pending',
     ragent_doc_id text,
     chunk_count   integer,
@@ -243,10 +232,12 @@ CREATE TABLE drafts (
 CREATE INDEX idx_drafts_pending ON drafts (created_at) WHERE status = 'pending';
 CREATE UNIQUE INDEX uq_drafts_one_pending ON drafts (ticket_id) WHERE status = 'pending';
 
+-- Reviews are made on the ticket system's own screens, by its staff, through
+-- our API: reviewed_by is the staff member's email as their system sends it.
 CREATE TABLE reviews (
     id             bigserial PRIMARY KEY,
     draft_id       bigint NOT NULL UNIQUE REFERENCES drafts(id),
-    reviewer_id    bigint NOT NULL REFERENCES reviewers(id),
+    reviewed_by    text NOT NULL CHECK (position('@' IN reviewed_by) > 1),
     outcome        review_outcome NOT NULL,
     final          jsonb,
     changed_fields text[] NOT NULL DEFAULT '{}',
@@ -255,7 +246,7 @@ CREATE TABLE reviews (
     comment        text,
     created_at     timestamptz NOT NULL DEFAULT now()
 );
-CREATE INDEX idx_reviews_reviewer ON reviews (reviewer_id, created_at);
+CREATE INDEX idx_reviews_by ON reviews (lower(reviewed_by), created_at);
 
 -- One TicketUpdate per approved draft, retried until it is written.
 CREATE TABLE ticket_writes (
@@ -303,7 +294,7 @@ CREATE TABLE urgent_keywords (
     id         bigserial PRIMARY KEY,
     keyword    text NOT NULL CHECK (length(btrim(keyword)) > 0),
     active     boolean NOT NULL DEFAULT true,
-    added_by   bigint REFERENCES reviewers(id),
+    added_by   text,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
 );
@@ -316,7 +307,7 @@ CREATE TABLE urgent_recipients (
     email      text NOT NULL CHECK (position('@' IN email) > 1),
     name       text,
     active     boolean NOT NULL DEFAULT true,
-    added_by   bigint REFERENCES reviewers(id),
+    added_by   text,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
 );
@@ -481,9 +472,9 @@ CREATE TABLE weekly_runs (
 
 
 -- ── Audit log: what a person did ─────────────────────────────────────────
--- Only decisions and changes made by people: approving, editing, rejecting
--- or setting aside a draft, uploading a file, and adding, removing or
--- changing a value. Nothing the agent does on its own is written here.
+-- Only decisions and changes made by people: approving, editing or
+-- rejecting a draft, uploading a file, and adding, removing or changing a
+-- value. Nothing the agent does on its own is written here.
 --   who:   the person's email
 --   what:  what was acted on ('draft', 'setting', 'queue', 'urgent keyword', ...)
 --   name:  which one (the setting key, the value, the file name, ...)
@@ -491,7 +482,7 @@ CREATE TABLE weekly_runs (
 CREATE TABLE audit_log (
     id         bigserial PRIMARY KEY,
     who        text NOT NULL,
-    action     text NOT NULL CHECK (action IN ('approve', 'edit', 'reject', 'not_ours',
+    action     text NOT NULL CHECK (action IN ('approve', 'edit', 'reject',
                                                'upload', 'add', 'remove', 'change')),
     what       text NOT NULL,
     name       text,

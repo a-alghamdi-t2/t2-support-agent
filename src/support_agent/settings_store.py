@@ -1,12 +1,11 @@
-"""The Settings page: settings a super admin changes from the console.
+"""The Settings page of our console: what our team changes without a restart.
 
-.env keeps only what must be known before the database can be read, or that
-nobody should be able to change from a browser: the database, the session
-secret, the super admins, the folders and ports. Everything in FIELDS below
-can be set on the page instead. A value saved there is a row in app_settings
-and wins over .env; "Use .env" deletes the row and the .env value (or the
-default) applies again. So a deployment with nothing saved behaves exactly as
-before, and existing .env files keep working.
+Only our own team sees it (console_users); nobody in the ticket system does.
+.env keeps what must be known before the database can be read, or that nobody
+should change from a browser: the database, SESSION_SECRET, API_KEY, the
+folders and ports. Everything in FIELDS can be set on the page instead. A
+value saved there is a row in app_settings and wins over .env; "back to .env"
+deletes the row and the .env value (or the default) applies again.
 
 Passwords and keys are encrypted in the database with a key derived from
 SESSION_SECRET, and never leave the server: the page shows whether one is set
@@ -77,6 +76,9 @@ FIELDS: tuple[Field, ...] = (
     Field("t2_password", "Ticket system", "API password", "", "secret"),
     Field("t2_poll_seconds", "Ticket system", "Seconds between checks",
           "How often the intake is checked.", "int"),
+    Field("ticket_url", "Ticket system", "Ticket link",
+          "A ticket's page, with {id} for its ID: the link in urgent emails and the "
+          "weekly report."),
 
     # ---- AI
     Field("groq_api_key", "AI models", "Groq API key", "", "secret"),
@@ -109,15 +111,15 @@ FIELDS: tuple[Field, ...] = (
     Field("mail_username", "Email", "Mail user", ""),
     Field("mail_password", "Email", "Mail password", "", "secret"),
     Field("mail_from", "Email", "Sent from", ""),
-    Field("console_url", "Email", "Console address",
-          "The link put in urgent emails and the weekly report."),
     Field("weekly_report_recipients", "Email", "Weekly report recipients",
           "Comma-separated addresses.", "list"),
-    Field("registration_allowlist", "Email", "Who may sign up",
-          "Comma-separated addresses and/or domains such as @t2.sa.", "list"),
 )
 BY_KEY = {f.key: f for f in FIELDS}
 GROUPS = tuple(dict.fromkeys(f.group for f in FIELDS))
+
+ENV_ONLY = ("DATABASE_URL", "SESSION_SECRET", "API_KEY", "QDRANT_URL", "DOCLING_URL",
+            "LOG_LEVEL")
+"""Shown on the page as set or not, never changeable from it."""
 
 # Built once per process from settings these depend on; rebuilt after a save
 # that changes any of them.
@@ -216,8 +218,7 @@ def apply(base: Settings) -> Settings:
         if row["secret"]:
             plain = _decrypt(row["value"])
             if plain is None:
-                log.warning("saved secret cannot be read; using .env",
-                            extra={"setting": key})
+                log.warning("saved secret cannot be read; using .env", extra={"setting": key})
                 continue
             overrides[key] = plain or None
         else:
@@ -251,10 +252,9 @@ def describe() -> dict:
     fields = []
     for f in FIELDS:
         row = rows.get(f.key)
-        source = "page" if row else (".env" if f.key in from_env else "default")
         item = {"key": f.key, "group": f.group, "label": f.label, "help": f.help,
-                "kind": f.kind, "danger": f.danger, "source": source,
-                "env_set": f.key in from_env,
+                "kind": f.kind, "danger": f.danger,
+                "source": "page" if row else (".env" if f.key in from_env else "default"),
                 "updated_by": row["updated_by"] if row else None,
                 "updated_at": row["updated_at"].isoformat() if row else None}
         if f.kind == "secret":
@@ -263,9 +263,8 @@ def describe() -> dict:
         else:
             item["value"] = _display(getattr(current, f.key))
         fields.append(item)
-    return {"groups": list(GROUPS), "fields": fields,
-            "env_only": ["DATABASE_URL", "SESSION_SECRET", "SUPER_ADMIN_EMAILS",
-                         "SESSION_COOKIE", "QDRANT_URL", "DOCLING_URL", "LOG_LEVEL"]}
+    env_set = {name: bool(getattr(base, name.lower(), None)) for name in ENV_ONLY}
+    return {"groups": list(GROUPS), "fields": fields, "env_only": env_set}
 
 
 # ---------------------------------------------------------------------------
@@ -285,15 +284,19 @@ def _check_ranges(merged: Settings, changed: set[str]) -> list[str]:
     if "kb_tenants" in changed and merged.kb_tenants:
         if any("=" not in p for p in merged.kb_tenants.split(",")):
             problems.append("Knowledge bases: write each as CODE=index, separated by commas")
+    if "ticket_url" in changed and merged.ticket_url:
+        if "{id}" not in merged.ticket_url or not merged.ticket_url.startswith(
+                ("https://", "http://")):
+            problems.append("Ticket link: a full address containing {id}")
     return problems
 
 
 def save(changes: dict[str, Any], who: str) -> dict:
-    """Save what the page sent: {key: value}, or {key: None} for "use .env".
+    """Save what the page sent: {key: value}, or {key: None} for "back to .env".
 
     For a secret, a value replaces it and None goes back to .env; it is never
     read back. Everything is checked together first; nothing is written if
-    anything is wrong.
+    anything is wrong. `who` is the console user's email.
     """
     unknown = [k for k in changes if k not in BY_KEY]
     if unknown:
@@ -327,7 +330,7 @@ def save(changes: dict[str, Any], who: str) -> dict:
                                          or _optional(k)})
     except ValidationError as exc:
         raise SettingsError("; ".join(
-            f"{BY_KEY.get(str(e['loc'][0]), Field(str(e['loc'][0]), '', str(e['loc'][0]), '')).label}"
+            f"{BY_KEY[str(e['loc'][0])].label if str(e['loc'][0]) in BY_KEY else e['loc'][0]}"
             f": {e['msg']}" for e in exc.errors())) from None
     changed = set(writes) | resets
     problems = _check_ranges(merged, changed)

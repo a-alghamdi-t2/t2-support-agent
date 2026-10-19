@@ -1,7 +1,7 @@
 """The audit log: what a person did.
 
 Only decisions and changes made by people are written here -- approving,
-editing, rejecting or setting aside a draft, uploading a file, and adding,
+editing or rejecting a draft, uploading a file, and adding,
 removing or changing a value. One row per thing done, naming who did it.
 What the agent does on its own is not audit: its reasoning and steps are kept
 with the draft (drafts.trace), its checks in their own tables, and the result
@@ -17,7 +17,7 @@ from support_agent.logging import get_logger
 
 log = get_logger(__name__)
 
-ACTIONS = ("approve", "edit", "reject", "not_ours", "upload", "add", "remove", "change")
+ACTIONS = ("approve", "edit", "reject", "upload", "add", "remove", "change")
 
 MAX_VALUE = 2000
 """Longer values (a pasted document, a long guidance text) are cut to this."""

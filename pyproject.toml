@@ -17,9 +17,9 @@ dependencies = [
     "langchain-groq>=1.0",
     "langgraph>=0.2",
     "yoyo-migrations>=8.2",
+    "python-multipart>=0.0.9",
     "bcrypt>=4.1",
     "itsdangerous>=2.1",
-    "python-multipart>=0.0.9",
     "cryptography>=42",
 ]
 
