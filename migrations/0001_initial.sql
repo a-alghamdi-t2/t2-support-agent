@@ -13,7 +13,7 @@ $$;
 
 CREATE TYPE article_party AS ENUM ('request', 'other');
 CREATE TYPE doc_status    AS ENUM ('pending', 'indexed', 'failed');
-CREATE TYPE draft_action  AS ENUM ('answer', 'route');
+CREATE TYPE draft_action  AS ENUM ('answer', 'route', 'spam');
 CREATE TYPE draft_status  AS ENUM ('pending', 'approved', 'rejected', 'superseded');
 CREATE TYPE reply_kind    AS ENUM ('answer', 'ask_more');
 CREATE TYPE review_outcome AS ENUM ('approve', 'edit', 'reject');
@@ -115,8 +115,12 @@ CREATE TABLE agent_option_kinds (
 CREATE TRIGGER agent_option_kinds_touch BEFORE UPDATE ON agent_option_kinds
     FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
 
+-- product (here and on documents and the urgent alerts): the product code it
+-- belongs to, e.g. RICH. Empty: every product.
+
 CREATE TABLE team_scopes (
     id          bigserial PRIMARY KEY,
+    product     text,
     content     text NOT NULL CHECK (length(btrim(content)) > 0),
     filename    text,
     uploaded_by text,
@@ -125,8 +129,9 @@ CREATE TABLE team_scopes (
 
 CREATE TABLE documents (
     id            bigserial PRIMARY KEY,
+    product       text,
     filename      text NOT NULL,
-    content_hash  text NOT NULL UNIQUE,
+    content_hash  text NOT NULL,
     size_bytes    bigint,
     uploaded_by   text NOT NULL,
     status        doc_status NOT NULL DEFAULT 'pending',
@@ -137,6 +142,7 @@ CREATE TABLE documents (
     indexed_at    timestamptz
 );
 CREATE INDEX idx_documents_status ON documents (status, created_at);
+CREATE UNIQUE INDEX uq_documents_content ON documents (coalesce(product, ''), content_hash);
 
 
 -- ── Open tickets the agent is working on ─────────────────────────────────
@@ -198,6 +204,12 @@ CREATE INDEX idx_articles_ticket ON articles (ticket_id, article_no);
 
 -- ── Drafts, reviews and what was written back ────────────────────────────
 
+-- action: route (to a product and queue), answer (route, with a reply to the
+--         customer), or spam (an unknown sender's spam: no product or queue).
+-- product_sure: false when the email did not make the product clear; the
+--         reviewer is asked to check it first.
+-- replaces_draft_id: a draft made again after the reviewer changed the
+--         product points at the one it replaced, which is then rejected.
 CREATE TABLE drafts (
     id                  bigserial PRIMARY KEY,
     ticket_id           bigint NOT NULL REFERENCES tickets(id),
@@ -205,10 +217,11 @@ CREATE TABLE drafts (
     action              draft_action NOT NULL,
     reply_kind          reply_kind,
     reply_body          text,
-    product             text NOT NULL,
-    queue               text NOT NULL,
+    product             text,
+    product_sure        boolean NOT NULL DEFAULT true,
+    queue               text,
     queue_reason        text,
-    next_state          text NOT NULL,
+    next_state          text,
     type                text,
     subtype             text,
     conclusions         text,
@@ -227,7 +240,9 @@ CREATE TABLE drafts (
     prompt_ver          text,
     latency_ms          integer,
     built_to_article_id bigint REFERENCES articles(id),
-    created_at          timestamptz NOT NULL DEFAULT now()
+    replaces_draft_id   bigint REFERENCES drafts(id),
+    created_at          timestamptz NOT NULL DEFAULT now(),
+    CHECK (action = 'spam' OR product IS NOT NULL)
 );
 CREATE INDEX idx_drafts_pending ON drafts (created_at) WHERE status = 'pending';
 CREATE UNIQUE INDEX uq_drafts_one_pending ON drafts (ticket_id) WHERE status = 'pending';
@@ -239,6 +254,7 @@ CREATE TABLE reviews (
     draft_id       bigint NOT NULL UNIQUE REFERENCES drafts(id),
     reviewed_by    text NOT NULL CHECK (position('@' IN reviewed_by) > 1),
     outcome        review_outcome NOT NULL,
+    send_reply     boolean NOT NULL DEFAULT false,
     final          jsonb,
     changed_fields text[] NOT NULL DEFAULT '{}',
     changes        jsonb NOT NULL DEFAULT '{}',
@@ -248,10 +264,13 @@ CREATE TABLE reviews (
 );
 CREATE INDEX idx_reviews_by ON reviews (lower(reviewed_by), created_at);
 
--- One TicketUpdate per approved draft, retried until it is written.
+-- What an approved draft writes to the ticket, retried until it is written:
+-- the routing with the internal note, then for Approve & Send the reply,
+-- which the ticket system emails to the customer.
 CREATE TABLE ticket_writes (
     id            bigserial PRIMARY KEY,
-    draft_id      bigint NOT NULL UNIQUE REFERENCES drafts(id),
+    draft_id      bigint NOT NULL REFERENCES drafts(id),
+    kind          text NOT NULL DEFAULT 'routing' CHECK (kind IN ('routing', 'reply')),
     payload       jsonb NOT NULL,
     status        write_status NOT NULL DEFAULT 'pending',
     attempts      smallint NOT NULL DEFAULT 0,
@@ -260,6 +279,7 @@ CREATE TABLE ticket_writes (
     created_at    timestamptz NOT NULL DEFAULT now(),
     delivered_at  timestamptz
 );
+CREATE UNIQUE INDEX uq_ticket_writes ON ticket_writes (draft_id, kind);
 CREATE INDEX idx_ticket_writes_pending ON ticket_writes (created_at) WHERE status = 'pending';
 
 
@@ -292,18 +312,20 @@ CREATE INDEX idx_draft_junk_flagged ON draft_junk (flagged) WHERE flagged;
 
 CREATE TABLE urgent_keywords (
     id         bigserial PRIMARY KEY,
+    product    text,
     keyword    text NOT NULL CHECK (length(btrim(keyword)) > 0),
     active     boolean NOT NULL DEFAULT true,
     added_by   text,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
 );
-CREATE UNIQUE INDEX uq_urgent_keyword ON urgent_keywords (lower(btrim(keyword)));
+CREATE UNIQUE INDEX uq_urgent_keyword ON urgent_keywords (coalesce(product, ''), lower(btrim(keyword)));
 CREATE TRIGGER urgent_keywords_touch BEFORE UPDATE ON urgent_keywords
     FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
 
 CREATE TABLE urgent_recipients (
     id         bigserial PRIMARY KEY,
+    product    text,
     email      text NOT NULL CHECK (position('@' IN email) > 1),
     name       text,
     active     boolean NOT NULL DEFAULT true,
@@ -311,7 +333,7 @@ CREATE TABLE urgent_recipients (
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
 );
-CREATE UNIQUE INDEX uq_urgent_recipient ON urgent_recipients (lower(btrim(email)));
+CREATE UNIQUE INDEX uq_urgent_recipient ON urgent_recipients (coalesce(product, ''), lower(btrim(email)));
 CREATE TRIGGER urgent_recipients_touch BEFORE UPDATE ON urgent_recipients
     FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
 

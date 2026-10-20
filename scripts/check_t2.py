@@ -49,7 +49,7 @@ def main() -> int:
             subtypes = sum(len(v) for v in p.types.values())
             linked = sum(1 for v in p.types.values() for x in v if x.reason)
             print(f"  {p.code:<9} {p.name:<20} {len(p.queues)} queues, {len(p.types)} types, "
-                  f"{subtypes} subtypes ({linked} with their reason), {len(p.reasons)} reasons")
+                  f"{subtypes} subtypes ({linked} with a reason)")
 
         ids = t2.intake()
         print(f"\nIntake: {len(ids)} email ticket(s) waiting")

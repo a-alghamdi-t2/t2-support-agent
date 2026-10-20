@@ -129,9 +129,21 @@ def _wanted(lookups) -> list[Wanted]:
     return rows
 
 
-def _hidden_on_arrival(kind: str, product: str | None, value: str) -> bool:
-    if kind == "product" and (product or "").upper() == get_settings().intake_product.upper():
-        return True
+def _hidden_on_arrival(kind: str, product: str | None, value: str, *, first_sync: bool) -> bool:
+    """Whether a value is kept from the agent when it first appears.
+
+    - the intake product itself, and the type "Default": always.
+    - a product added to the ticket system later: until an AI admin
+      describes it. Choosing the product is the agent's first decision, and a
+      bare new name next to described ones would draw tickets it should not.
+      Its queues, types and subtypes are offered at once: they only come into
+      play once the product is chosen. (On the very first sync nothing is
+      hidden this way: every product is new then.)
+    """
+    if kind == "product":
+        if (product or "").upper() == get_settings().intake_product.upper():
+            return True
+        return not first_sync
     return kind == "type" and value.strip().lower() in HIDE_ON_ARRIVAL_TYPES
 
 
@@ -171,6 +183,7 @@ def _apply(wanted) -> SyncResult:
                         "removed_at FROM agent_options")
             have = {_key(r["kind"], r["product"], r["parent"], r["value"]): r
                     for r in cur.fetchall()}
+            first_sync = not have
             seen = set()
             for kind, product, parent, value, conclusion, position in wanted:
                 key = _key(kind, product, parent, value)
@@ -186,7 +199,8 @@ def _apply(wanted) -> SyncResult:
                         VALUES (%s, %s, %s, %s, %s, %s, %s)
                         """,
                         (kind, product, parent, value, conclusion,
-                         _hidden_on_arrival(kind, product, value), position))
+                         _hidden_on_arrival(kind, product, value, first_sync=first_sync),
+                         position))
                     result.added += 1
                     continue
                 if row["removed_at"] is not None:
@@ -225,6 +239,13 @@ def invalidate() -> None:
     _cache["rows"] = None
 
 
+def _waiting_for_description(r: dict) -> bool:
+    """A product added later, hidden until someone describes it."""
+    return (r["kind"] == "product" and r["hidden"] and r["description"] is None
+            and r["updated_by"] is None and r["removed_at"] is None
+            and (r["product"] or "").upper() != get_settings().intake_product.upper())
+
+
 def _rows() -> list[Option]:
     rows = _cache["rows"]
     if rows is not None:
@@ -236,7 +257,8 @@ def _rows() -> list[Option]:
                        value=r["value"], description=r["description"],
                        conclusion=r["conclusion"], hidden=r["hidden"],
                        is_new=(r["seen_at"] is None and r["description"] is None
-                               and r["removed_at"] is None and not r["hidden"]),
+                               and r["removed_at"] is None
+                               and (not r["hidden"] or _waiting_for_description(r))),
                        removed=r["removed_at"] is not None)
                 for r in postgres.query(
                     "SELECT * FROM agent_options ORDER BY kind, product NULLS FIRST, "
@@ -342,13 +364,16 @@ def describe(option_id: int, text: str | None, *, who: str) -> Option:
         raise OptionError(f"at most {MAX_DESCRIPTION} characters")
     if text == row["description"]:
         return _option(option_id)
+    # A product that arrived hidden is offered once someone describes it.
+    show = bool(text) and _waiting_for_description(row)
     postgres.execute(
         """
         UPDATE agent_options SET description = %s, updated_by = %s, updated_at = now(),
-               seen_at = COALESCE(seen_at, now())
+               seen_at = COALESCE(seen_at, now()),
+               hidden = CASE WHEN %s THEN false ELSE hidden END
         WHERE id = %s
         """,
-        (text, who, option_id))
+        (text, who, show, option_id))
     audit.record(who=who, action="change", what=f"{row['kind']} description",
                  name=_label(row), old=row["description"], new=text)
     invalidate()

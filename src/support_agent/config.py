@@ -65,9 +65,10 @@ class Settings(BaseSettings):
     """Comma-separated product codes. Whose closed tickets the Friday run adds
     to the history."""
 
-    kb_tenants: str = "RICH=rich,OLE5=ole5"
-    """Comma-separated code=index pairs: each product's knowledge base in
-    Qdrant. A product with none drafts without one."""
+    kb_tenants: str | None = None
+    """Comma-separated code=index pairs, only for a product whose knowledge
+    base index is not named after its code. Otherwise a product's index is
+    its code in lower case: RICH -> rich, AVL-SME -> avl-sme."""
 
     precedent_tenant: str = "t2-precedent"
     """The similar-tickets index in Qdrant, shared by every product."""
@@ -291,6 +292,12 @@ class Settings(BaseSettings):
             if sep and code.strip() and tenant.strip():
                 out[code.strip().upper()] = tenant.strip()
         return out
+
+    def kb_tenant(self, code: str) -> str:
+        """The knowledge base index for a product: its code in lower case,
+        unless KB_TENANTS names another."""
+        code = code.strip().upper()
+        return self.kb_tenant_map.get(code) or code.lower()
 
     def product_dir(self, code: str) -> Path:
         """products/<code>, lower case: products/rich for RICH."""

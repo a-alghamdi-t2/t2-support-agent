@@ -94,6 +94,30 @@ def test_default_type_is_hidden_on_arrival(db, t2):
         del fake.PRODUCTS["OLE5"]["types"]["Default"]
 
 
+def test_a_product_added_later_waits_for_a_description(db, t2):
+    options.sync(t2=t2)
+    fake.PRODUCTS["TQN"] = {"name": "Taqnia", "queues": ["Taqnia Support"],
+                            "types": {"Inquiry": ["General"]}}
+    try:
+        options.sync(t2=t2, force=True)
+        tqn = options.product("TQN")
+        assert tqn.hidden and tqn.is_new                     # New on the admin page
+        assert "Taqnia" not in [o.value for o in options.products()]    # step 1 can't pick it
+        assert [o.value for o in options.queues("TQN")] == ["Taqnia Support"]   # ready below
+        options.mark_seen(tqn.id)
+        assert options.product("TQN").hidden                 # opening it is not enough
+        options.describe(tqn.id, "Taqnia cloud services: VMs, storage, backups.",
+                         who="ai.admin@t2.sa")
+        assert "Taqnia" in [o.value for o in options.products()]
+        assert not options.product("TQN").is_new
+        # Hidden on purpose later: describing again does not bring it back.
+        options.set_hidden(tqn.id, True, who="ai.admin@t2.sa")
+        options.describe(tqn.id, "Taqnia cloud.", who="ai.admin@t2.sa")
+        assert options.product("TQN").hidden
+    finally:
+        del fake.PRODUCTS["TQN"]
+
+
 def test_changes_by_people_are_audited_and_clear_new(db, t2):
     options.sync(t2=t2)
     q = options.find("queue", "Ole5 Technical", product="OLE5")

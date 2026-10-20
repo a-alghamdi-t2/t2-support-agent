@@ -91,8 +91,9 @@ FIELDS: tuple[Field, ...] = (
           "The language the journeys are written in."),
 
     # ---- indexes
-    Field("kb_tenants", "Indexes", "Knowledge bases", "Comma-separated code=index pairs: "
-          "each product's knowledge base in Qdrant, e.g. RICH=rich.", "pairs"),
+    Field("kb_tenants", "Indexes", "Knowledge base names", "Only for a product whose index "
+          "is not named after its code (RICH -> rich): comma-separated CODE=index pairs.",
+          "pairs"),
     Field("precedent_tenant", "Indexes", "Similar-tickets index", "The name in Qdrant."),
     Field("junk_tenant", "Indexes", "Junk index", "The name in Qdrant."),
 
