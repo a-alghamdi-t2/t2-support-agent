@@ -167,12 +167,12 @@ def test_description_without_a_message_is_the_first_article(c):
     assert t.articles[1].body == "agent note"
 
 
-def test_lookups_today_and_after_their_change(c):
+def test_lookups_with_and_without_reasons(c):
     lk = c.lookups()
     rich = lk.product("rich")
     assert rich.name == "RiCH" and "RiCH Technical" in rich.queues
     assert [s.name for s in rich.types["Inquiry"]] == ["DLR - Call Barring", "User Permissions"]
-    assert rich.types["Inquiry"][0].reason is None and rich.reasons
+    assert rich.types["Inquiry"][0].reason is None
     assert ("closed successful", True) in lk.statuses and lk.priorities[-1] == "Critical"
     assert lk.product("Unclassified Email").queues == ()
     fake.subtypes_with_reasons = True
@@ -195,3 +195,47 @@ def test_client_needs_configuration(monkeypatch):
     with pytest.raises(T2Error) as e:
         connect()
     assert e.value.code == "Config.Missing" and not e.value.refused
+
+
+def test_a_reply_is_emailed_on_its_own_and_reports_its_message_id(c):
+    tid = fake.add_email("Renew sender", "Please renew.")
+    fake.T[tid]["contact"] = "Active"
+    c.update(tid, product="RiCH", queue="RiCH Support", type="Request",
+             note=Note("Support Agent: routed", "why"))
+    r = c.reply(tid, subject="Renewing your sender name", body="Please send the contract.")
+    assert r.email_sent and r.message_id and r.article_id
+    assert fake.sent_mail[-1]["subject"].startswith(f"[{fake.T[tid]['number']}]")
+    reply = c.get(tid).articles[-1]
+    assert reply.visible and reply.via_email
+
+
+def test_an_internal_note_says_no_email(c):
+    tid = fake.add_email("One", "x")
+    r = c.update(tid, product="RiCH", queue="RiCH Support", note=Note("s", "b"))
+    assert r.email_sent is False and r.message_id is None
+
+
+@pytest.mark.parametrize("codes", [False, True])
+def test_reply_refusals_before_sending_are_told_apart(c, codes):
+    fake.email_codes = codes
+    tid = fake.add_email("One", "x")
+    with pytest.raises(T2Error) as e:                     # the sender is still Pending
+        c.reply(tid, subject="s", body="b")
+    assert e.value.email_not_tried == "contact pending" and not e.value.email_uncertain
+    fake.T[tid]["contact"] = "Active"
+    with pytest.raises(T2Error) as e:                     # not classified yet
+        c.reply(tid, subject="s", body="b")
+    assert e.value.email_not_tried == "not classified"
+    assert fake.sent_mail == []
+
+
+def test_a_reply_that_may_have_gone_out_is_uncertain(c):
+    tid = fake.add_email("One", "x")
+    fake.T[tid].update(contact="Active", requires=False)
+    fake.mail_fails.extend(["send", "persist"])
+    for _ in range(2):
+        with pytest.raises(T2Error) as e:
+            c.reply(tid, subject="s", body="b")
+        assert e.value.email_uncertain and not e.value.email_not_tried
+    assert len(fake.sent_mail) == 1                       # the second one did go out
+    assert [a for a in c.get(tid).articles if a.visible and not a.from_customer] == []

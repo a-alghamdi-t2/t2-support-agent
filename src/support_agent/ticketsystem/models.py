@@ -115,7 +115,7 @@ class Subtype:
     name: str
     reason: str | None = None
     """The text their screen expects in Conclusions for this subtype. None
-    until TicketLookupsGet returns it per subtype."""
+    when the product's catalog gives none (only RiCH's does today)."""
 
 
 @dataclass(frozen=True)
@@ -124,8 +124,6 @@ class ProductValues:
     code: str
     queues: tuple[str, ...]
     types: dict[str, tuple[Subtype, ...]]
-    reasons: tuple[str, ...]
-    """Every reason for the product, not linked to a subtype."""
     slas: tuple[str, ...]
 
 
@@ -152,8 +150,12 @@ class Note:
     body: str
     visible: bool = False
     """False: an internal note, which staff see and the customer does not.
-    True stores a reply on the ticket but does NOT email it: the API does not
-    send email yet."""
+    True: a reply, which their system emails to the customer at once, from
+    the support mailbox, with the ticket number added to the subject. It is
+    refused for a pending contact or an unclassified ticket."""
+    sender: str | None = None
+    """Who the ticket page shows as having written it (their Article.From).
+    Used for internal notes; a reply always shows the support mailbox."""
 
 
 @dataclass(frozen=True)
@@ -161,3 +163,8 @@ class WriteResult:
     ticket_id: str
     number: str
     article_id: str | None
+    email_sent: bool | None = None
+    """True when a reply was emailed, False for an internal note, None when
+    no article was written."""
+    message_id: str | None = None
+    """The sent email's ID (Gmail's, or the SMTP Message-ID)."""

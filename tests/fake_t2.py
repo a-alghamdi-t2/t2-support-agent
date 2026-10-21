@@ -1,11 +1,13 @@
 """A stand-in for the T2 Ticketing System's TicketAPI, for tests.
 
-Follows what the API does (T2 Agent Ticket API, October 2026): HTTP 200 with
+Follows what the API does (T2 Agent Ticket API, 20 October 2026): HTTP 200 with
 an Error object on refusal; times in Riyadh time; queue, type and subtype
 looked up under the target product; the product applied first; Conclusions
 at most 500 characters; history entries with "Queue changed from 'X' to 'Y'";
 the description listed as the first article when no message holds it;
-search needing at least one filter. Plugged into httpx with MockTransport.
+search needing at least one filter; a reply (IsVisibleForCustomer 1) emailed
+during the call, refused for a pending contact or an unclassified ticket, and
+nothing of the call saved when the email fails. Plugged into httpx with MockTransport.
 """
 
 from __future__ import annotations
@@ -41,16 +43,21 @@ T: dict[str, dict] = {}
 calls: list[tuple[str, dict]] = []
 now = datetime(2026, 10, 19, 9, 0, 0)          # Riyadh time, naive like theirs
 fail_next: list[int] = []                      # HTTP status codes to answer with next
-subtypes_with_reasons = False                  # their requested change, when it lands
+subtypes_with_reasons = False                  # RiCH's catalog reasons on its subtypes
+email_codes = False                            # their separate refusal codes (A6), once live
+mail_fails: list[str] = []                     # "send" (not confirmed) or "persist", next reply
+sent_mail: list[dict] = []
 _seq = 0
 
 
 def reset() -> None:
-    global _seq, subtypes_with_reasons
+    global _seq, subtypes_with_reasons, email_codes
     T.clear()
     calls.clear()
     fail_next.clear()
-    subtypes_with_reasons = False
+    mail_fails.clear()
+    sent_mail.clear()
+    subtypes_with_reasons = email_codes = False
     _seq = 0
 
 
@@ -68,7 +75,8 @@ def add_email(title: str, body: str, email: str = "client@example.com",
     T[tid] = {"id": tid, "number": f"T-{at:%Y%m%d%H%M%S}000-{_seq:04d}", "title": title,
               "product": "EMAIL", "queue": None, "status": "Open", "priority": "Low",
               "type": "Incident", "subtype": None, "reason": None, "requires": True,
-              "assigned_staff": None, "email": email, "created": at, "resolved": None,
+              "assigned_staff": None, "email": email, "contact": "Pending",
+              "created": at, "resolved": None,
               "description": body, "history": [],
               "threads": [{"id": str(uuid.uuid4()), "customer": True, "channel": "Email",
                            "internal": False, "from": email, "subject": title,
@@ -194,8 +202,11 @@ def get(b: dict) -> dict:
         "Queue": t["queue"] or "", "State": t["status"], "StateType": _state_type(t["status"]),
         "Type": t["type"], "Priority": t["priority"], "Service": p["name"],
         "ProductCode": t["product"], "SLA": "", "RequiresClassification": int(t["requires"]),
-        "CustomerID": "EMAIL-97D648B5D334 - Pending Email Contacts", "CustomerUserID": t["email"],
-        "CustomerContactStatus": "Pending", "OrganizationName": "Pending Email Contacts",
+        "CustomerID": ("EMAIL-97D648B5D334 - Pending Email Contacts" if t["contact"] == "Pending"
+                       else "CUST-0042"), "CustomerUserID": t["email"],
+        "CustomerContactStatus": t["contact"],
+        "OrganizationName": ("Pending Email Contacts" if t["contact"] == "Pending"
+                             else "Alwaha Clinics"),
         "CustomerTier": "", "IsVipUser": 0, "Created": fmt(t["created"]), "Changed": fmt(now),
         "EscalationResponseTime": "0", "EscalationUpdateTime": "0", "EscalationSolutionTime": "0",
         "DynamicField": fields, "Article": articles, "History": history}]}
@@ -245,6 +256,29 @@ def update(b: dict) -> dict:
     art = b.get("Article")
     if art is not None and not (art.get("Body") or "").strip():
         return err("TicketUpdate.InvalidArticleBody", "Article.Body is required.")
+    send = bool(art) and art.get("IsVisibleForCustomer") == 1
+    message_id = None
+    if send:
+        if not (art.get("Subject") or "").strip():
+            return err("TicketUpdate.InvalidArticle", "Article.Subject is required.")
+        classified = not t["requires"] or bool(ttype or subtype or conclusions is not None)
+        if t["contact"] == "Pending":
+            return err("TicketUpdate.ContactPending" if email_codes else "TicketUpdate.EmailFailed",
+                       "Approve or link this pending contact before replying.")
+        if not classified:
+            return err("TicketUpdate.NotClassified" if email_codes else "TicketUpdate.EmailFailed",
+                       "Classify this customer ticket before replying.")
+        failure = mail_fails.pop(0) if mail_fails else None
+        if failure == "send":
+            return err("TicketUpdate.EmailFailed",
+                       "Customer email could not be confirmed. No reply was recorded as sent.")
+        message_id = f"<{uuid.uuid4()}@mail.t2.test>"
+        sent_mail.append({"to": t["email"], "subject": f"[{t['number']}] {art['Subject']}",
+                          "body": art["Body"], "message_id": message_id})
+        if failure == "persist":
+            return err("TicketUpdate.EmailPersistenceFailed",
+                       f"The email was accepted (MessageID: {message_id}), but saving the "
+                       "ticket failed. Do not resend automatically; reconcile the ticket first.")
 
     if target != t["product"]:
         _log(t, "Product Changed",
@@ -274,7 +308,8 @@ def update(b: dict) -> dict:
     if art:
         art_id = str(uuid.uuid4())
         internal = art.get("IsVisibleForCustomer") != 1
-        t["threads"].append({"id": art_id, "customer": False, "channel": "T2AgentApi",
+        t["threads"].append({"id": art_id, "customer": False,
+                             "channel": "Email" if send else "T2AgentApi",
                              "internal": internal, "from": art.get("From"),
                              "subject": art.get("Subject"), "body": art["Body"].strip(),
                              "at": now + timedelta(seconds=len(t["threads"]))})
@@ -282,6 +317,9 @@ def update(b: dict) -> dict:
     out = {"TicketID": t["id"].lower(), "TicketNumber": t["number"]}
     if art_id:
         out["ArticleID"] = art_id
+        out["EmailSent"] = 1 if send else 0
+        if message_id:
+            out["MessageID"] = message_id
     return out
 
 
@@ -307,13 +345,12 @@ def lookups(b: dict) -> dict:
     out = []
     for c in codes:
         p = PRODUCTS[c]
-        types = [{"Name": n, "SubTypes": [{"Name": s, "Reason": REASONS.get(s, "")}
-                                           if subtypes_with_reasons else s for s in subs]}
+        types = [{"Name": n, "SubTypes": [
+            {"Name": s} | ({"Reason": REASONS[s]} if subtypes_with_reasons and s in REASONS
+                           else {}) for s in subs]}
                  for n, subs in p["types"].items()]
-        reasons = sorted({REASONS[s] for subs in p["types"].values() for s in subs
-                          if s in REASONS})
         out.append({"Name": p["name"], "Code": c, "Queues": p["queues"], "Types": types,
-                    "Reasons": reasons, "SLAs": [f"{p['name']} SLA"] if p["queues"] else []})
+                    "SLAs": [f"{p['name']} SLA"] if p["queues"] else []})
     return {"Products": out,
             "Statuses": [{"Name": n, "IsClosedState": int(c)} for n, c in STATUSES],
             "Priorities": PRIORITIES}

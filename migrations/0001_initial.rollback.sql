@@ -1,7 +1,7 @@
 DROP TABLE IF EXISTS
     audit_log, weekly_runs, boilerplate_lines, draft_similar, ticket_scopes,
     ticket_journeys, ticket_timelines, closed_articles, closed_tickets,
-    urgent_emails, urgent_recipients, urgent_keywords, draft_spam, draft_urgent,
+    urgent_emails, urgent_recipients, urgent_keywords, reply_signatures, draft_spam, draft_urgent,
     ticket_writes, reviews, drafts, articles, tickets, documents, team_scopes,
     agent_option_kinds, agent_options, app_settings, console_sessions, console_users;
 

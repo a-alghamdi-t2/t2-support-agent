@@ -133,8 +133,8 @@ asking.
 - Greeting on its own line, then a blank line, then the answer. Blank lines
   between points where they help; do not run it together as one paragraph.
 - End on the last sentence of the answer. No sign-off, no "regards", no team
-  name, no signature. The person sending it adds their own, and yours would
-  appear twice.
+  name, no signature. The team's signature is added under every reply when it
+  is sent, and yours would appear twice.
 
 ## Asking for more
 

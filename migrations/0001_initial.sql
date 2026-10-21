@@ -17,7 +17,13 @@ CREATE TYPE draft_action  AS ENUM ('answer', 'route', 'spam');
 CREATE TYPE draft_status  AS ENUM ('pending', 'approved', 'rejected', 'superseded');
 CREATE TYPE reply_kind    AS ENUM ('answer', 'ask_more');
 CREATE TYPE review_outcome AS ENUM ('approve', 'edit', 'reject');
-CREATE TYPE write_status  AS ENUM ('pending', 'sent', 'failed');
+-- write_status: pending (to do, or to try again), sent, held (refused before
+-- anything was sent: the contact is pending, the ticket not classified ... a
+-- person fixes it and sends again), uncertain (it may have happened: a
+-- timeout, or an email accepted and not saved; a person checks, never
+-- repeated by itself), failed (not written, for good: someone else handled
+-- the ticket, or a value no longer exists).
+CREATE TYPE write_status  AS ENUM ('pending', 'sent', 'held', 'uncertain', 'failed');
 
 
 -- ── Who did what ─────────────────────────────────────────────────────────
@@ -283,6 +289,8 @@ CREATE TABLE ticket_writes (
     attempts      smallint NOT NULL DEFAULT 0,
     last_error    text,
     t2_article_id text,
+    message_id    text,
+    resolved_by   text,
     created_at    timestamptz NOT NULL DEFAULT now(),
     delivered_at  timestamptz
 );
@@ -313,6 +321,25 @@ CREATE TABLE draft_spam (
     created_at  timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_draft_spam_flagged ON draft_spam (flagged) WHERE flagged;
+
+
+-- ── Reply signatures ─────────────────────────────────────────────────────
+
+-- Added under every reply sent to a customer. One per product, set on the AI
+-- admin page; product NULL is the one for every product, used when a product
+-- has none. Arabic for a reply in Arabic, English otherwise; when one is
+-- empty the other is used.
+CREATE TABLE reply_signatures (
+    id         bigserial PRIMARY KEY,
+    product    text,
+    arabic     text CHECK (arabic IS NULL OR length(btrim(arabic)) > 0),
+    english    text CHECK (english IS NULL OR length(btrim(english)) > 0),
+    updated_by text,
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX uq_reply_signature ON reply_signatures (coalesce(product, ''));
+CREATE TRIGGER reply_signatures_touch BEFORE UPDATE ON reply_signatures
+    FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
 
 
 -- ── Urgent alerts ────────────────────────────────────────────────────────

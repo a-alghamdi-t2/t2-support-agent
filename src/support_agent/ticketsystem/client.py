@@ -5,9 +5,10 @@ API user and password in the body:
 
     TicketSearch     ticket IDs matching filters (the intake, closed tickets)
     TicketGet        one ticket with its articles and history
-    TicketUpdate     route a ticket and add a note, in one transaction
-    TicketLookupsGet the products, queues, types, subtypes, reasons,
-                     statuses and priorities the system has now
+    TicketUpdate     route a ticket and add a note, in one transaction; or
+                     email a reply to the customer
+    TicketLookupsGet the products, queues, types, subtypes with their
+                     reasons, statuses and priorities the system has now
     TicketCreate     tests only; off in production (AllowTicketCreate)
 
 Their API answers HTTP 200 with an "Error" object when it refuses something;
@@ -19,6 +20,10 @@ spaced by T2_MIN_INTERVAL. Reads are retried on a dropped connection, a 429
 or a 5xx. Writes are retried only when the request never left (the
 connection could not be made): a write that timed out may have been applied,
 so it is reported, not repeated; the writer decides.
+
+A reply (an article with IsVisibleForCustomer 1) is emailed during the call,
+and if the email fails nothing of that call is saved. Sending is not
+idempotent: a reply is never sent twice by this code, whatever the error.
 """
 
 from __future__ import annotations
@@ -73,6 +78,39 @@ class T2Error(RuntimeError):
     def refused(self) -> bool:
         """Their API answered and said no: retrying the same call will not help."""
         return not self.code.startswith(("Transport.", "Config."))
+
+    @property
+    def email_not_tried(self) -> str | None:
+        """For a reply refused before anything was sent, why: the contact is
+        pending, the ticket is not classified, or the customer's email
+        notifications are off. A person fixes it and it can be sent again."""
+        if self.code in EMAIL_NOT_TRIED:
+            return EMAIL_NOT_TRIED[self.code]
+        if self.code == "TicketUpdate.EmailFailed":
+            # Until their separate codes are live, the message says which.
+            text = self.message.lower()
+            if "pending contact" in text:
+                return "contact pending"
+            if "classify this" in text:
+                return "not classified"
+        return None
+
+    @property
+    def email_uncertain(self) -> bool:
+        """A reply that may have reached the customer: never send it again
+        without a person checking the mailbox's Sent folder."""
+        if self.email_not_tried:
+            return False
+        return self.maybe_applied or self.code in ("TicketUpdate.EmailFailed",
+                                                   "TicketUpdate.EmailPersistenceFailed")
+
+
+EMAIL_NOT_TRIED = {
+    "TicketUpdate.ContactPending": "contact pending",
+    "TicketUpdate.NotClassified": "not classified",
+    "TicketUpdate.NotificationsDisabled": "notifications off",
+}
+"""Their codes for a reply refused before sending (requested, A6)."""
 
 
 def _zone(name: str):
@@ -307,6 +345,11 @@ class T2Client:
             raise ValueError("nothing to update")
         return self._write_result(self._call("TicketUpdate", body))
 
+    def reply(self, ticket_id: str, *, subject: str, body: str) -> WriteResult:
+        """Email a reply to the ticket's customer, on its own: nothing else
+        changes, so a failed email undoes nothing else. Never retried here."""
+        return self.update(ticket_id, note=Note(subject, body, visible=True))
+
     def create(self, *, title: str, customer_email: str, body: str, product: str,
                queue: str | None = None, subject: str | None = None,
                state: str | None = None, priority: str | None = None,
@@ -327,16 +370,22 @@ class T2Client:
 
     @staticmethod
     def _article(note: Note) -> dict[str, Any]:
-        return {"Subject": _fit(note.subject, 500), "Body": note.body,
-                "ContentType": "text/plain; charset=utf-8",
-                "IsVisibleForCustomer": 1 if note.visible else 0}
+        article = {"Subject": _fit(note.subject, 500), "Body": note.body,
+                   "ContentType": "text/plain; charset=utf-8",
+                   "IsVisibleForCustomer": 1 if note.visible else 0}
+        if note.sender:
+            article["From"] = note.sender
+        return article
 
     @staticmethod
     def _write_result(data: dict[str, Any]) -> WriteResult:
+        sent = data.get("EmailSent")
         return WriteResult(ticket_id=str(data.get("TicketID") or "").lower(),
                            number=str(data.get("TicketNumber") or ""),
                            article_id=(str(data["ArticleID"]).lower()
-                                       if data.get("ArticleID") else None))
+                                       if data.get("ArticleID") else None),
+                           email_sent=None if sent is None else _flag(sent),
+                           message_id=str(data["MessageID"]) if data.get("MessageID") else None)
 
     def _ticket(self, t: dict[str, Any]) -> Ticket:
         fields = {str(f.get("Name")): str(f.get("Value") or "")
@@ -402,7 +451,6 @@ class T2Client:
             products.append(ProductValues(
                 name=_s(p, "Name"), code=_s(p, "Code"),
                 queues=tuple(str(q) for q in p.get("Queues") or []), types=types,
-                reasons=tuple(str(r) for r in p.get("Reasons") or []),
                 slas=tuple(str(x) for x in p.get("SLAs") or [])))
         statuses = tuple((_s(s, "Name"), _flag(s.get("IsClosedState")))
                          for s in data.get("Statuses") or [])
