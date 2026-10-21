@@ -118,6 +118,39 @@ def test_a_product_added_later_waits_for_a_description(db, t2):
         del fake.PRODUCTS["TQN"]
 
 
+def test_there_is_always_one_default(db, t2):
+    r = options.sync(t2=t2)
+    assert r.defaults == 6            # a queue and a type for RiCH and Ole5, a status, a priority
+    assert options.default("queue", "RICH").value == "RiCH Support"
+    assert options.default("type", "RICH").value == "Inquiry"     # first in their order
+    assert options.default("next_state").value == "Open"
+    assert options.default("priority").value == "Low"
+    assert options.default("queue", "EMAIL") is None              # no queues: none
+
+    tech = options.find("queue", "RiCH Technical", product="RICH")
+    options.set_default(tech.id, who="ai.admin@t2.sa")              # changed, not added
+    assert options.default("queue", "RICH").value == "RiCH Technical"
+    assert db.query_one("SELECT count(*) AS n FROM agent_options WHERE is_default "
+                        "AND kind = 'queue' AND product = 'RICH'")["n"] == 1
+    row = db.query_one("SELECT * FROM audit_log WHERE what = 'default queue'")
+    assert (row["name"], row["old_value"], row["new_value"]) == (
+        "RICH", "RiCH Support", "RiCH Technical")
+
+    with pytest.raises(options.OptionError):                        # can't hide the default
+        options.set_hidden(tech.id, True, who="ai.admin@t2.sa")
+    with pytest.raises(options.OptionError):
+        options.set_default(options.find("subtype", "Login", product="OLE5").id,
+                            who="ai.admin@t2.sa")
+
+    # Removed in the ticket system: another is chosen on the next sync.
+    fake.PRODUCTS["RICH"]["queues"].remove("RiCH Technical")
+    try:
+        assert options.sync(t2=t2, force=True).defaults == 1
+        assert options.default("queue", "RICH").value == "RiCH Support"
+    finally:
+        fake.PRODUCTS["RICH"]["queues"].append("RiCH Technical")
+
+
 def test_changes_by_people_are_audited_and_clear_new(db, t2):
     options.sync(t2=t2)
     q = options.find("queue", "Ole5 Technical", product="OLE5")

@@ -72,8 +72,8 @@ class Settings(BaseSettings):
 
     precedent_tenant: str = "t2-precedent"
     """The similar-tickets index in Qdrant, shared by every product."""
-    junk_tenant: str = "t2-junk"
-    """The junk index in Qdrant. Junk arrives through the same mailbox for
+    spam_tenant: str = "t2-spam"
+    """The spam index in Qdrant. Spam arrives through the same mailbox for
     every product, so there is one."""
 
 
@@ -117,22 +117,22 @@ class Settings(BaseSettings):
     happens and the report is kept in weekly_runs, but nobody is emailed."""
 
     history_candidate_pool: int = 10
-    """Candidates the reranker scores in the similar-tickets and junk searches.
+    """Candidates the reranker scores in the similar-tickets and spam searches.
     The reranker runs on CPU at about a second per candidate, so this is most
-    of a search's time. The junk calibration is measured with the same number;
+    of a search's time. The spam calibration is measured with the same number;
     keep them the same. The knowledge base has its own, kb_candidate_pool."""
 
-    # The junk check (support_agent.history.junk). junk_threshold is the
-    # similarity a ticket must reach against the junk index; set it from
-    # `python scripts/junk.py calibrate`, never by guess -- a false positive
+    # The spam check (support_agent.history.spam). spam_threshold is the
+    # similarity a ticket must reach against the spam index; set it from
+    # `python scripts/spam.py calibrate`, never by guess -- a false positive
     # marks a real customer's ticket as spam.
-    junk_threshold: float = 0.90
-    junk_floor: float = 0.30
-    junk_margin: float = 0.25
-    """A ticket whose best junk match reaches junk_floor and beats its best
-    real match by junk_margin is flagged too: reworded spam of a known kind."""
-    junk_sender_min: int = 5
-    """Junk tickets a domain must have sent, with no real ones, before the
+    spam_threshold: float = 0.90
+    spam_floor: float = 0.30
+    spam_margin: float = 0.25
+    """A ticket whose best spam match reaches spam_floor and beats its best
+    real match by spam_margin is flagged too: reworded spam of a known kind."""
+    spam_sender_min: int = 5
+    """Spam tickets a domain must have sent, with no real ones, before the
     sender alone counts as a signal."""
 
     # The journey extraction over closed tickets (support_agent.history.journey),

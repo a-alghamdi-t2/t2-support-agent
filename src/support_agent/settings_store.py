@@ -95,16 +95,16 @@ FIELDS: tuple[Field, ...] = (
           "is not named after its code (RICH -> rich): comma-separated CODE=index pairs.",
           "pairs"),
     Field("precedent_tenant", "Indexes", "Similar-tickets index", "The name in Qdrant."),
-    Field("junk_tenant", "Indexes", "Junk index", "The name in Qdrant."),
+    Field("spam_tenant", "Indexes", "Spam index", "The name in Qdrant."),
 
     # ---- checks
     Field("similar_min_score", "Checks", "Similar tickets: minimum score",
           "Past tickets scoring below this are not shown.", "float"),
-    Field("junk_threshold", "Checks", "Junk: near-duplicate score", "", "float"),
-    Field("junk_floor", "Checks", "Junk: closer-to-junk floor", "", "float"),
-    Field("junk_margin", "Checks", "Junk: closer-to-junk margin", "", "float"),
-    Field("junk_sender_min", "Checks", "Junk: sender rule",
-          "Junk tickets a domain must have sent, with no real ones.", "int"),
+    Field("spam_threshold", "Checks", "Spam: near-duplicate score", "", "float"),
+    Field("spam_floor", "Checks", "Spam: closer-to-spam floor", "", "float"),
+    Field("spam_margin", "Checks", "Spam: closer-to-spam margin", "", "float"),
+    Field("spam_sender_min", "Checks", "Spam: sender rule",
+          "Spam tickets a domain must have sent, with no real ones.", "int"),
 
     # ---- email
     Field("smtp_host", "Email", "Mail server", ""),
@@ -129,7 +129,7 @@ _CACHED = (
     ("support_agent.history.journey", "_prompt", {"journey_language"}),
     ("support_agent.knowledge.retriever", "_tenant", {"groq_api_key", "kb_tenants"}),
     ("support_agent.history.precedent", "_tenant", {"groq_api_key", "precedent_tenant",
-                                                    "junk_tenant"}),
+                                                    "spam_tenant"}),
     ("support_agent.history.precedent", "_rag", {"groq_api_key"}),
 )
 
@@ -274,7 +274,7 @@ def describe() -> dict:
 
 def _check_ranges(merged: Settings, changed: set[str]) -> list[str]:
     problems = []
-    for key in ("similar_min_score", "junk_threshold", "junk_floor", "junk_margin"):
+    for key in ("similar_min_score", "spam_threshold", "spam_floor", "spam_margin"):
         if key in changed and not 0 <= getattr(merged, key) <= 1:
             problems.append(f"{BY_KEY[key].label}: between 0 and 1")
     if "t2_poll_seconds" in changed and merged.t2_poll_seconds < 10:

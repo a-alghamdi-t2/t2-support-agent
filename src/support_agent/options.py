@@ -28,6 +28,13 @@ Rows by kind:
                 conclusion = its reason
     next_state  value = status, parent = "open" or "closed"
     priority    value = priority
+
+There is always a default: one queue and one type per product, one status and
+one priority for all. sync() chooses one wherever there is none (the first
+sync, a new product, a default removed in the ticket system), and an AI admin
+can make another value the default but not leave a kind without one. The
+agent's choice falls back to it when what the model wrote is not a real value
+(orchestrator.validate).
 """
 
 from __future__ import annotations
@@ -43,6 +50,9 @@ from support_agent.logging import get_logger
 log = get_logger(__name__)
 
 KINDS = ("product", "queue", "type", "subtype", "next_state", "priority")
+DEFAULT_KINDS = ("queue", "type", "next_state", "priority")
+"""Kinds that always have a default. Queues and types per product; statuses
+and priorities for all."""
 MAX_DESCRIPTION = 500
 MAX_GUIDANCE = 2000
 
@@ -67,6 +77,7 @@ class Option:
     hidden: bool
     is_new: bool
     removed: bool
+    is_default: bool = False
 
     @property
     def offered(self) -> bool:
@@ -87,6 +98,8 @@ class SyncResult:
     removed: int = 0
     returned: int = 0
     updated: int = 0
+    defaults: int = 0
+    """Defaults chosen because a kind had none."""
     skipped: str | None = None
     """Why nothing was read: "fresh" or the error."""
 
@@ -224,7 +237,42 @@ def _apply(wanted) -> SyncResult:
                     cur.execute("UPDATE agent_options SET removed_at = now() WHERE id = %s",
                                 (row["id"],))
                     result.removed += 1
+            result.defaults = _ensure_defaults(cur)
     return result
+
+
+def _pick_default(kind: str, rows: list[dict]) -> dict:
+    """The value chosen as the default when a kind has none. A sensible
+    start, which an AI admin can change: the Support queue, the first type
+    in their order, Open, the lowest priority."""
+    rows = sorted(rows, key=lambda r: (r["position"], r["value"].lower()))
+    if kind == "queue":
+        return next((r for r in rows if "support" in r["value"].lower()), rows[0])
+    if kind == "next_state":
+        return next((r for r in rows if r["value"].strip().lower() == "open"),
+                    next((r for r in rows if r["parent"] == "open"), rows[0]))
+    return rows[0]
+
+
+def _ensure_defaults(cur) -> int:
+    """A default wherever a kind has none offered. Not audited: nobody chose
+    it, and the Values page shows it as chosen by the agent."""
+    cur.execute("UPDATE agent_options SET is_default = false "
+                "WHERE is_default AND (hidden OR removed_at IS NOT NULL)")
+    cur.execute("SELECT id, kind, product, parent, value, position, is_default "
+                "FROM agent_options WHERE kind = ANY(%s) AND NOT hidden "
+                "AND removed_at IS NULL", (list(DEFAULT_KINDS),))
+    groups: dict[tuple, list[dict]] = {}
+    for r in cur.fetchall():
+        groups.setdefault((r["kind"], r["product"] or ""), []).append(r)
+    chosen = 0
+    for (kind, _), rows in groups.items():
+        if any(r["is_default"] for r in rows):
+            continue
+        cur.execute("UPDATE agent_options SET is_default = true WHERE id = %s",
+                    (_pick_default(kind, rows)["id"],))
+        chosen += 1
+    return chosen
 
 
 # ---------------------------------------------------------------------------
@@ -256,6 +304,7 @@ def _rows() -> list[Option]:
                 Option(id=r["id"], kind=r["kind"], product=r["product"], parent=r["parent"],
                        value=r["value"], description=r["description"],
                        conclusion=r["conclusion"], hidden=r["hidden"],
+                       is_default=r["is_default"],
                        is_new=(r["seen_at"] is None and r["description"] is None
                                and r["removed_at"] is None
                                and (not r["hidden"] or _waiting_for_description(r))),
@@ -324,6 +373,14 @@ def priorities() -> list[Option]:
     return [o for o in _rows() if o.kind == "priority" and o.offered]
 
 
+def default(kind: str, code: str | None = None) -> Option | None:
+    """The default value of a kind (for a product, for queues and types), when
+    one is set and still offered."""
+    want = (code or "").upper() if kind in ("queue", "type") else ""
+    return next((o for o in _rows() if o.kind == kind and o.is_default and o.offered
+                 and (o.product or "") == want), None)
+
+
 def find(kind: str, value: str, *, product: str | None = None,
          parent: str | None = None) -> Option | None:
     """An offered value by name, ignoring case: for checking what the model
@@ -384,6 +441,9 @@ def set_hidden(option_id: int, hidden: bool, *, who: str) -> Option:
     row = _get(option_id)
     if row["hidden"] == hidden:
         return _option(option_id)
+    if hidden and row["is_default"]:
+        raise OptionError(f"{row['value']} is the default {row['kind']}: "
+                          "make another one the default first")
     postgres.execute(
         """
         UPDATE agent_options SET hidden = %s, updated_by = %s, updated_at = now(),
@@ -394,6 +454,34 @@ def set_hidden(option_id: int, hidden: bool, *, who: str) -> Option:
     audit.record(who=who, action="change", what=row["kind"], name=_label(row),
                  old="hidden" if row["hidden"] else "offered",
                  new="hidden" if hidden else "offered")
+    invalidate()
+    return _option(option_id)
+
+
+def set_default(option_id: int, *, who: str) -> Option:
+    """Make a value its kind's default (for its product). It replaces the one
+    before: there is always exactly one, so a default is changed, never just
+    taken away."""
+    row = _get(option_id)
+    if row["kind"] not in DEFAULT_KINDS:
+        raise OptionError(f"a {row['kind']} cannot be a default")
+    if row["is_default"]:
+        return _option(option_id)
+    if row["hidden"] or row["removed_at"] is not None:
+        raise OptionError("a hidden or removed value cannot be the default")
+    before = postgres.query_one(
+        "SELECT value FROM agent_options WHERE kind = %s AND coalesce(product, '') = %s "
+        "AND is_default", (row["kind"], row["product"] or ""))
+    with postgres.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE agent_options SET is_default = false "
+                        "WHERE kind = %s AND coalesce(product, '') = %s AND is_default",
+                        (row["kind"], row["product"] or ""))
+            cur.execute("UPDATE agent_options SET is_default = true, updated_by = %s, "
+                        "seen_at = COALESCE(seen_at, now()) WHERE id = %s", (who, option_id))
+    audit.record(who=who, action="change", what=f"default {row['kind']}",
+                 name=row["product"] or row["kind"],
+                 old=before["value"] if before else None, new=row["value"])
     invalidate()
     return _option(option_id)
 

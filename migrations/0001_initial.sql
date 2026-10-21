@@ -74,6 +74,9 @@ CREATE TABLE app_settings (
 --              (for RiCH, the reason from their catalog).
 -- hidden:      never offered to the agent (the type "Default", the intake
 --              product itself ...).
+-- is_default:  the value an AI admin chose for when the agent's choice is not
+--              a real value: one queue and one type per product, one status
+--              and one priority for all.
 -- first_seen_at / seen_at: a value is "New" on the Values page from when it
 --              first appeared until someone writes its description or marks
 --              it seen.
@@ -90,19 +93,23 @@ CREATE TABLE agent_options (
     description   text CHECK (description IS NULL OR length(btrim(description)) > 0),
     conclusion    text,
     hidden        boolean NOT NULL DEFAULT false,
+    is_default    boolean NOT NULL DEFAULT false,
     "position"    integer NOT NULL DEFAULT 0,
     first_seen_at timestamptz NOT NULL DEFAULT now(),
     seen_at       timestamptz,
     removed_at    timestamptz,
     updated_by    text,
     updated_at    timestamptz NOT NULL DEFAULT now(),
-    CHECK (kind <> 'subtype' OR parent IS NOT NULL)
+    CHECK (kind <> 'subtype' OR parent IS NOT NULL),
+    CHECK (NOT is_default OR kind IN ('queue', 'type', 'next_state', 'priority'))
 );
 CREATE INDEX idx_agent_options_kind ON agent_options (kind, product);
 CREATE INDEX idx_agent_options_new ON agent_options (first_seen_at)
     WHERE seen_at IS NULL AND description IS NULL AND removed_at IS NULL;
 CREATE UNIQUE INDEX uq_agent_options_value
     ON agent_options (kind, coalesce(product, ''), coalesce(parent, ''), lower(value));
+CREATE UNIQUE INDEX uq_agent_options_default
+    ON agent_options (kind, coalesce(product, '')) WHERE is_default;
 CREATE TRIGGER agent_options_touch BEFORE UPDATE ON agent_options
     FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
 
@@ -294,18 +301,18 @@ CREATE TABLE draft_urgent (
     created_at   timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE TABLE draft_junk (
+CREATE TABLE draft_spam (
     draft_id    bigint PRIMARY KEY REFERENCES drafts(id) ON DELETE CASCADE,
     score       real NOT NULL DEFAULT 0,
     matches     jsonb NOT NULL DEFAULT '[]',
-    sender_junk integer NOT NULL DEFAULT 0,
+    sender_spam integer NOT NULL DEFAULT 0,
     sender_real integer NOT NULL DEFAULT 0,
     flagged     boolean NOT NULL DEFAULT false,
     reason      text,
     threshold   real,
     created_at  timestamptz NOT NULL DEFAULT now()
 );
-CREATE INDEX idx_draft_junk_flagged ON draft_junk (flagged) WHERE flagged;
+CREATE INDEX idx_draft_spam_flagged ON draft_spam (flagged) WHERE flagged;
 
 
 -- ── Urgent alerts ────────────────────────────────────────────────────────
@@ -381,15 +388,15 @@ CREATE TABLE closed_tickets (
     fetched_at       timestamptz NOT NULL DEFAULT now(),
     search_text      text,
     search_ver       text,
-    junk_check       text CHECK (junk_check IN ('kept', 'repeat', 'real_copy')),
-    junk_check_ref   text,
-    junk_check_score real,
-    junk_fingerprint text,
-    junk_checked_at  timestamptz
+    spam_check       text CHECK (spam_check IN ('kept', 'repeat', 'real_copy')),
+    spam_check_ref   text,
+    spam_check_score real,
+    spam_fingerprint text,
+    spam_checked_at  timestamptz
 );
 CREATE INDEX idx_closed_queue   ON closed_tickets (queue, t2_closed_at);
 CREATE INDEX idx_closed_subtype ON closed_tickets (subtype);
-CREATE INDEX idx_closed_junk_fingerprint ON closed_tickets (junk_fingerprint) WHERE junk_check = 'kept';
+CREATE INDEX idx_closed_spam_fingerprint ON closed_tickets (spam_fingerprint) WHERE spam_check = 'kept';
 
 CREATE TABLE closed_articles (
     id               bigserial PRIMARY KEY,

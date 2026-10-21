@@ -29,7 +29,7 @@ def main() -> int:
             print(f"Not refreshed: {r.skipped}")
         else:
             print(f"Refreshed: {r.added} added, {r.removed} removed, {r.returned} back, "
-                  f"{r.updated} updated")
+                  f"{r.updated} updated, {r.defaults} default(s) chosen")
         print(f"New, not looked at yet: {options.new_count()}\n")
 
         rows = options.everything()
@@ -47,10 +47,14 @@ def main() -> int:
             print(f"  queues: {', '.join(q.value for q in options.queues(code)) or '-'}")
             print(f"  types:  {len(types)}, subtypes offered: "
                   f"{sum(len(t.subtypes) for t in types)}")
+            dq, dt = options.default("queue", code), options.default("type", code)
+            print(f"  defaults: queue {dq.value if dq else '-'}, type {dt.value if dt else '-'}")
         hidden = [o for o in rows if o.hidden]
         removed = [o for o in rows if o.removed]
         print(f"\nStatuses:   {', '.join(o.value for o in options.statuses())}")
         print(f"Priorities: {', '.join(o.value for o in options.priorities())}")
+        ds, dp = options.default("next_state"), options.default("priority")
+        print(f"Defaults:   status {ds.value if ds else '-'}, priority {dp.value if dp else '-'}")
         print(f"Hidden from the agent: {', '.join(o.value for o in hidden) or '-'}")
         print(f"Removed from the ticket system: {len(removed)}")
         return 0
