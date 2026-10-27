@@ -9,3 +9,4 @@ data/
 *.dump
 *.tgz
 mail/
+seed-*.ps1
