@@ -75,7 +75,21 @@ def show(draft_id: int, *, steps: bool = False) -> None:
     ev = d["evidence"] or {}
     for s in ev.get("searches", []):
         found = f"{len(s['evidence'])} passage(s)" + (f", {s['error']}" if s["error"] else "")
-        print(f"  searched     {s['query']!r} -> {s['verdict']} ({found})")
+        secs = f", {s['elapsed_ms'] / 1000:.0f} s" if s.get("elapsed_ms") else ""
+        print(f"  searched     {s['query']!r} -> {s['verdict']} ({found}{secs})")
+        # Each passage it found: which file, which section, and with --show
+        # the passage itself, so a reply can be checked against its source.
+        for e in s["evidence"]:
+            where = " / ".join(x for x in (e.get("source_file") or e.get("document"),
+                                           e.get("section")) if x)
+            print(f"    [{e['relation']}] {where}")
+            if steps:
+                if e.get("reason"):
+                    print("      why: " + textwrap.shorten(e["reason"], 200))
+                for line in (e.get("text") or "").splitlines():
+                    print(f"      | {line}")
+        for c in s.get("considered") or []:
+            print(f"    considered, not used: {c}")
     for c in ev.get("corrections", []):
         print(f"  corrected    {c}")
     urgent = postgres.query_one("SELECT by_agent, agent_reason, keywords FROM draft_urgent "
@@ -124,7 +138,7 @@ def main() -> int:
                     "SELECT DISTINCT ON (d.ticket_id) d.id FROM drafts d "
                     "JOIN tickets t ON t.id = d.ticket_id WHERE t.ticket_number = ANY(%s) "
                     "ORDER BY d.ticket_id, d.id DESC", (r.tickets,)):
-                show(row["id"])
+                show(row["id"], steps=args.show)
             return 0 if not r.failed else 1
 
         t = postgres.query_one("SELECT id FROM tickets WHERE ticket_number = %s",

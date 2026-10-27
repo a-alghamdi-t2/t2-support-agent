@@ -33,6 +33,12 @@ from support_agent.db import migrate, postgres  # noqa: E402
 from support_agent.review import actions, signatures, writer  # noqa: E402
 
 
+WRITE_NAMES = {"routing": "classification + note", "reply": "reply email",
+               "spam": "block the sender and close their tickets"}
+"""What each write does, in words: "routing" is the code's name for the first
+write, which every approval makes, an answer as much as a routing."""
+
+
 def _draft_of(number: str) -> int:
     row = postgres.query_one(
         "SELECT d.id FROM drafts d JOIN tickets t ON t.id = d.ticket_id "
@@ -67,7 +73,8 @@ def _list() -> None:
         WHERE w.status <> 'sent' ORDER BY w.created_at""")
     print(f"\nWrites not done: {len(writes)}")
     for w in writes:
-        print(f"  #{w['id']} {w['ticket_number']} {w['kind']}: {w['status']}"
+        print(f"  #{w['id']} {w['ticket_number']} {WRITE_NAMES.get(w['kind'], w['kind'])}: "
+              f"{w['status']}"
               + (f" ({w['attempts']} tries)" if w["attempts"] else "")
               + (f"\n      {w['last_error']}" if w["last_error"] else ""))
 
@@ -123,7 +130,8 @@ def main() -> int:
                     changes[k.strip()] = v
                 a = actions.approve(_draft_of(args.target), who=args.by or "", send=args.send,
                                     changes=changes, comment=args.comment)
-                print(f"{a.outcome}: will write {', '.join(a.writes) or 'nothing'}"
+                print(f"{a.outcome}: will write "
+                      f"{', then '.join(WRITE_NAMES.get(k, k) for k in a.writes) or 'nothing'}"
                       + (f"; changed {', '.join(a.changed_fields)}" if a.changed_fields else ""))
             elif args.command == "reject":
                 actions.reject(_draft_of(args.target), who=args.by or "", reason=args.reason or "")

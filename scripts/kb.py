@@ -44,9 +44,12 @@ def _files(paths: list[str]) -> list[Path]:
     out: list[Path] = []
     for p in map(Path, paths):
         if p.is_dir():
+            # A product's folder may also hold its team scopes: those go in with
+            # `scopes`, read whole by the agent, not into the knowledge base.
             out += sorted(f for f in p.iterdir()
                           if f.is_file() and f.suffix.lower() in documents.TEXT_TYPES
-                          + documents.DOCLING_TYPES)
+                          + documents.DOCLING_TYPES
+                          and not f.stem.lower().startswith("team_scopes"))
         else:
             out.append(p)
     return out

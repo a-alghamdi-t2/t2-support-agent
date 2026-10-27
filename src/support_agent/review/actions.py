@@ -272,7 +272,8 @@ def approve(draft_id: int, *, who: str, send: bool = False, changes: dict | None
     body = ticket_note.render(final=final, product_name=product.value if product else final["product"],
                               reviewer=who, reply=reply_state, changes=diff,
                               urgent_reason=urgent["agent_reason"] if urgent else None,
-                              comment=comment, reply_text=signed)
+                              comment=comment, reply_text=signed,
+                              passages=ticket_note.sources(row["evidence"]))
     writes = [("routing", {
         "product": final["product"], "queue": final.get("queue"), "type": final.get("type"),
         "subtype": final.get("subtype"), "conclusions": final.get("conclusions"),

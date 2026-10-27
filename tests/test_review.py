@@ -87,6 +87,7 @@ def test_approve_and_send(db, t2, ticket, live):
     assert order == sorted(order) and "Sent to the customer as its own message." in body
     assert body.count("=" * 60) == 6                 # a rule before each section
     assert note["from"] == "Support Agent"          # not shown as the customer
+    assert note["subject"] == "Support Agent: answered in RiCH Support, reply sent"
     assert not reply["internal"] and reply["body"].endswith("فريق دعم ريتش")   # Arabic reply
     mail = fake.sent_mail[-1]
     assert mail["to"] == "nora@alwaha-clinics.sa" and mail["subject"].endswith(
@@ -97,6 +98,26 @@ def test_approve_and_send(db, t2, ticket, live):
     assert writer.send_pending(t2=t2) == (0, 0)          # nothing twice
     row = db.query_one("SELECT * FROM audit_log WHERE action = 'approve'")
     assert (row["who"], row["name"]) == ("sara@t2.sa", t["number"])
+
+
+def test_the_note_shows_the_passages_the_reply_rests_on(db, t2, ticket, live):
+    passage = {"document": "RiCH FAQ", "section": "Sender names", "relation": "DIRECT",
+               "source_file": "RICH_KB.md", "text": "To renew a sender name,\nsend the contract.",
+               "reason": "answers it", "score": 3}
+    related = {"document": "RiCH guide", "section": "Contracts", "relation": "INFERENTIAL",
+               "source_file": "RICH_Guide.md", "text": "Contracts last a year.",
+               "reason": "on the subject", "score": 2}
+    evidence = {"searches": [{"query": "renew sender name", "evidence": [related, passage]},
+                             {"query": "contract", "evidence": [passage]}]}   # found twice
+    d = _draft(db, ticket, evidence=json.dumps(evidence))
+    actions.approve(d, who=SARA)
+    writer.send_pending(t2=t2)
+    note = fake.T[ticket["t2"]]["threads"][-1]["body"]
+    section = note[note.index("KNOWLEDGE BASE"):note.index("STILL TO FIND OUT")]
+    assert "1. RICH_KB.md / Sender names (answers the question)" in section   # direct first
+    assert "     To renew a sender name,\n     send the contract." in section
+    assert "2. RICH_Guide.md / Contracts (related)" in section
+    assert section.count("RICH_KB.md") == 1                                  # once
 
 
 def test_approve_and_draft_keeps_the_reply_in_the_note(db, t2, ticket, live):
@@ -130,6 +151,7 @@ def test_a_routing_keeps_the_agents_reply_in_the_note(db, t2, ticket, live):
     note = fake.T[ticket["t2"]]["threads"][-1]["body"]
     assert "Routed; nothing was sent to the customer." in note
     assert "Not sent: the ticket was routed." in note and "Please send the contract." in note
+    assert fake.T[ticket["t2"]]["threads"][-1]["subject"] == "Support Agent: routed to RiCH Support"
 
 
 def test_the_note_says_why_urgent_and_who_was_alerted(db, t2, ticket, live):

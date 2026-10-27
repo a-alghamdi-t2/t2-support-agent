@@ -12,9 +12,11 @@ document is only ever added to or removed from its product's index. The same
 file can be in two products, once each; uploading it twice to one product is
 answered with the one already there.
 
-Markdown and text go straight into RAGent2. PDF and Office files need Docling
-to turn them into text: without DOCLING_URL they are refused at upload, with
-it they are accepted. The code is the same either way; only the settings say.
+Every file goes through Docling (DOCLING_URL) first: RAGent2 0.2.0 has it turn
+even Markdown into its own Markdown, and reads PDFs page by page with a vision
+model. So without DOCLING_URL nothing is accepted for upload, and nothing
+waiting is indexed. The same code runs locally and in production; only the
+addresses differ.
 
 Every upload and delete goes in the audit log, with who did it.
 """
@@ -24,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import shutil
+import threading
 from pathlib import Path
 
 from support_agent import options
@@ -106,9 +109,9 @@ def upload(code: str, filename: str, raw: bytes, *, who: str) -> tuple[dict, boo
     if not name or suffix not in TEXT_TYPES + DOCLING_TYPES:
         raise DocumentError(f"{suffix or 'that file'} cannot be indexed; accepted: "
                             + ", ".join(TEXT_TYPES + DOCLING_TYPES))
-    if suffix in DOCLING_TYPES and not s.docling_url:
-        raise DocumentError(f"{suffix} files need Docling (DOCLING_URL) to be read; "
-                            "Markdown and text files do not")
+    if not s.docling_url:
+        raise DocumentError("documents need Docling (DOCLING_URL) to be read, and it is "
+                            "not set")
     if not raw:
         raise DocumentError("the file is empty")
     if len(raw) > s.max_upload_mb * 1024 * 1024:
@@ -154,16 +157,30 @@ def _claim(limit: int) -> list[dict]:
         """, (limit,))
 
 
+_LOOP: asyncio.AbstractEventLoop | None = None
+_LOOP_LOCK = threading.Lock()
+
+
 def _add(code: str, path: Path):
-    """RAGent2's add, which is async, from a worker thread."""
-    return asyncio.run(retriever.tenant(code).aadd(str(path)))
+    """RAGent2's add, which is async, from synchronous code.
+
+    Always on the same event loop, kept for the life of the process: RAGent2
+    is built once (retriever._ragent) and its HTTP clients belong to the loop
+    they were first used on. A new loop per document (asyncio.run) closes
+    the old one under them, and the next document fails with "Event loop is
+    closed". The lock keeps it to one document at a time."""
+    global _LOOP
+    with _LOOP_LOCK:
+        if _LOOP is None or _LOOP.is_closed():
+            _LOOP = asyncio.new_event_loop()
+        return _LOOP.run_until_complete(retriever.tenant(code).aadd(str(path)))
 
 
 def index_pending(*, limit: int = 5) -> tuple[int, int]:
     """Index what is waiting. Returns (indexed, failed). Never raises for one
     document. Without a knowledge base configured, does nothing."""
     s = get_settings()
-    if not s.qdrant_url:
+    if not s.qdrant_url or not s.docling_url:
         return 0, 0
     try:
         from ragent2.errors import DuplicateDocumentError

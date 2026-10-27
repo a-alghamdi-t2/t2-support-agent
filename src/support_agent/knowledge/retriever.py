@@ -65,17 +65,21 @@ def _ragent() -> Any:
         raise KnowledgeUnavailable(
             "ragent2 is not installed; it comes from the private feed") from exc
 
-    return Ragent(settings=RagSettings(
-        groq_api_key=s.groq_api_key.get_secret_value(),
-        qdrant_url=s.qdrant_url,
-        docling_serve_api_url=s.docling_url,
-        candidate_pool_size=s.kb_candidate_pool,
-        hybrid_prefetch_limit=s.kb_candidate_pool,
-        top_k=s.kb_top_k,
-        tool_call_repair_attempts=s.kb_tool_repair_attempts,
-        max_search_rounds=s.kb_max_rounds,
-        embedding_service_timeout=s.kb_embed_timeout,
-    ))
+    values = {
+        "groq_api_key": s.groq_api_key.get_secret_value(),
+        "qdrant_url": s.qdrant_url,
+        "docling_serve_api_url": s.docling_url,
+        "candidate_pool_size": s.kb_candidate_pool,
+        "hybrid_prefetch_limit": s.kb_candidate_pool,
+        "top_k": s.kb_top_k,
+        "tool_call_repair_attempts": s.kb_tool_repair_attempts,
+        "max_search_rounds": s.kb_max_rounds,
+        "embedding_service_timeout": s.kb_embed_timeout,
+    }
+    # Only what is set: RAGent2 refuses None for its text settings and has its
+    # own defaults for them. Searching needs no Docling; indexing does, and
+    # documents.py does not index without DOCLING_URL.
+    return Ragent(settings=RagSettings(**{k: v for k, v in values.items() if v is not None}))
 
 
 @lru_cache(maxsize=32)
@@ -89,11 +93,27 @@ def tenant(code: str) -> Any:
     return _tenant(get_settings().kb_tenant(code))
 
 
+def _document_name(item: Any) -> str | None:
+    """The document a passage or a trace entry comes from. RAGent2 0.2.0 has
+    no document_name of its own on either: a passage has it in metadata, a
+    trace entry only in its sources."""
+    name = getattr(item, "document_name", None)
+    if name:
+        return name
+    meta = getattr(item, "metadata", None) or {}
+    if meta.get("document_name"):
+        return meta["document_name"]
+    for src in getattr(item, "sources", None) or ():
+        if isinstance(src, dict) and src.get("document_name"):
+            return src["document_name"]
+    return None
+
+
 def _to_evidence(chunk: Any) -> Evidence:
     meta = getattr(chunk, "metadata", None) or {}
     return Evidence(
         text=getattr(chunk, "text", "") or "",
-        document=getattr(chunk, "document_name", None) or meta.get("document_name") or "unknown",
+        document=_document_name(chunk) or "unknown",
         section=meta.get("section"),
         source_file=meta.get("source_file"),
         relation=(getattr(chunk, "relation", None) or "UNKNOWN").upper(),
@@ -154,7 +174,7 @@ def retrieve(question: str, code: str) -> Retrieval:
     returned = {e.document for e in evidence}
     seen: dict[str, str] = {}
     for t in getattr(diagnostics, "trace", ()) or ():
-        name = getattr(t, "document_name", None)
+        name = _document_name(t)
         if not name or getattr(t, "returned", False) or name in returned:
             continue
         # IGNORE means graded and rejected; None means never graded at all.

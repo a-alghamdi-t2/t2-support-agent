@@ -2,8 +2,10 @@
 
 Staff see it on the ticket page; the customer never does. It says who
 approved it, what the customer asked, the classification, why the agent chose
-the queue and the rest, what the reviewer changed, and the suggested reply:
-sent, to check and send (Approve & Draft), or kept for the team on a routing.
+the queue and the rest, the knowledge base passages it found (file, section
+and the passage, so the reply can be checked against its source), what the
+reviewer changed, and the suggested reply: sent, to check and send (Approve &
+Draft), or kept for the team on a routing.
 
 Plain text, one section after another with a rule between them; English
 labels, the customer's language only inside the reply.
@@ -14,6 +16,11 @@ from __future__ import annotations
 from support_agent.config import get_settings
 
 RULE = "=" * 60
+
+MAX_SOURCES = 5
+"""Passages written in the note, the direct ones first."""
+SOURCE_CHARS = 1200
+"""Of each passage. The full text stays in the draft's evidence."""
 
 LABELS = {"product": "Product", "queue": "Queue", "type": "Type", "subtype": "Subtype",
           "conclusions": "Conclusions", "next_state": "Status", "priority": "Priority",
@@ -29,14 +36,51 @@ REPLY_HEADINGS = {
 def subject(final: dict, *, reply: str) -> str:
     """reply: "sent", "to_send", "kept" or "none"."""
     agent = get_settings().agent_name
-    where = f"routed to {final['queue']}" if final.get("queue") else "classified"
+    queue = final.get("queue")
+    if final.get("action") == "answer":
+        # Answered, not routed: the queue is only where the ticket now sits.
+        where = "answered" + (f" in {queue}" if queue else "")
+    else:
+        where = f"routed to {queue}" if queue else "classified"
     tail = {"sent": ", reply sent", "to_send": ", reply to check and send"}.get(reply, "")
     return f"{agent}: {where}{tail}"
 
 
+def sources(evidence: dict | None) -> list[dict]:
+    """The passages the agent's searches found, from a draft's evidence: once
+    each, direct before inferential."""
+    seen, out = set(), []
+    for s in (evidence or {}).get("searches") or []:
+        for e in s.get("evidence") or []:
+            key = (e.get("source_file") or e.get("document"), e.get("section"),
+                   (e.get("text") or "")[:200])
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(e)
+    out.sort(key=lambda e: 0 if e.get("relation") == "DIRECT" else 1)
+    return out
+
+
+def _sources_section(passages: list[dict]) -> list[str]:
+    rows = ["KNOWLEDGE BASE"]
+    for i, e in enumerate(passages[:MAX_SOURCES], 1):
+        where = " / ".join(x for x in (e.get("source_file") or e.get("document"),
+                                       e.get("section")) if x)
+        kind = "answers the question" if e.get("relation") == "DIRECT" else "related"
+        text = (e.get("text") or "").strip()
+        if len(text) > SOURCE_CHARS:
+            text = text[:SOURCE_CHARS].rstrip() + " …"
+        rows += ["", f"  {i}. {where} ({kind})",
+                 *[f"     {line}" if line.strip() else "" for line in text.splitlines()]]
+    if len(passages) > MAX_SOURCES:
+        rows += ["", f"  … and {len(passages) - MAX_SOURCES} more in the agent's record"]
+    return rows
+
+
 def render(*, final: dict, product_name: str, reviewer: str, reply: str,
            changes: dict, urgent_reason: str | None = None, comment: str | None = None,
-           reply_text: str | None = None) -> str:
+           reply_text: str | None = None, passages: list[dict] | None = None) -> str:
     """The note body.
 
     final        the fields as approved
@@ -70,6 +114,9 @@ def render(*, final: dict, product_name: str, reviewer: str, reply: str,
         sections.append(["QUEUE REASON", final["queue_reason"].strip()])
     if (final.get("reasoning") or "").strip():
         sections.append(["AGENT REASONING", final["reasoning"].strip()])
+
+    if passages:
+        sections.append(_sources_section(passages))
 
     if changes:
         rows = ["CHANGED BY THE REVIEWER"]

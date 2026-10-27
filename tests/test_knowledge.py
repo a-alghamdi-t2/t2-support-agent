@@ -54,6 +54,7 @@ def rag(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "qdrant_client", None)      # by doc id only
     monkeypatch.setattr(retriever, "tenant", lambda code: FakeIndex(store, code))
     monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
+    monkeypatch.setenv("DOCLING_URL", "http://localhost:8092")
     monkeypatch.setenv("GROQ_API_KEY", "test-key")
     monkeypatch.setenv("UPLOAD_DIR", str(tmp_path))
     config.env_settings.cache_clear()
@@ -92,18 +93,60 @@ def test_upload_index_and_search_one_products_knowledge_base(db, values, rag, tm
 def test_what_cannot_be_uploaded(db, values, rag, monkeypatch):
     with pytest.raises(documents.DocumentError, match="cannot be indexed"):
         documents.upload("RICH", "run.exe", b"x", who=ADMIN)
-    with pytest.raises(documents.DocumentError, match="need Docling"):
-        documents.upload("RICH", "guide.pdf", b"%PDF-1.7", who=ADMIN)
     with pytest.raises(documents.DocumentError, match="UTF-8"):
         documents.upload("RICH", "guide.md", "دليل".encode("cp1256"), who=ADMIN)
     with pytest.raises(documents.DocumentError, match="not a product"):
         documents.upload("EMAIL", "guide.md", GUIDE, who=ADMIN)
     with pytest.raises(documents.DocumentError, match="empty"):
         documents.upload("RICH", "guide.md", b"", who=ADMIN)
-    monkeypatch.setenv("DOCLING_URL", "http://localhost:8092")   # production: PDFs too
+    assert documents.upload("RICH", "guide.pdf", b"%PDF-1.7", who=ADMIN)[1]
+    monkeypatch.delenv("DOCLING_URL")             # RAGent2 0.2.0 reads every file with it
     config.env_settings.cache_clear()
     config.refresh_settings()
-    assert documents.upload("RICH", "guide.pdf", b"%PDF-1.7", who=ADMIN)[1]
+    with pytest.raises(documents.DocumentError, match="need Docling"):
+        documents.upload("RICH", "notes.md", GUIDE, who=ADMIN)
+    assert documents.index_pending() == (0, 0)    # what waits, waits
+
+
+def test_addresses_must_be_addresses(monkeypatch):
+    def problems() -> str:
+        config.env_settings.cache_clear()
+        try:
+            config.env_settings()
+            return ""
+        except config.ConfigError as exc:
+            return str(exc)
+        finally:
+            config.env_settings.cache_clear()
+
+    monkeypatch.setenv("DOCLING_URL", "DOCLING_URL=http://localhost:8092")   # a typo in .env
+    assert "DOCLING_URL" in problems() and "http://" in problems()
+    monkeypatch.setenv("DOCLING_URL", "http://localhost:8092/")
+    assert "DOCLING_URL" not in problems()
+
+
+def test_indexing_keeps_one_event_loop(db, values, rag):
+    """RAGent2's HTTP clients belong to the loop they were first used on: a
+    second document on a new loop failed with "Event loop is closed"."""
+    import asyncio
+    loops = []
+    real = FakeIndex.aadd
+
+    async def remember(self, path):
+        loops.append(asyncio.get_running_loop())
+        return await real(self, path)
+
+    FakeIndex.aadd = remember
+    try:
+        documents.upload("RICH", "a.md", GUIDE, who=ADMIN)
+        documents.upload("RICH", "b.md", GUIDE + b"more", who=ADMIN)
+        assert documents.index_pending() == (2, 0)
+        assert documents.index_pending() == (0, 0)
+        documents.upload("RICH", "c.md", GUIDE + b"again", who=ADMIN)
+        assert documents.index_pending() == (1, 0)
+    finally:
+        FakeIndex.aadd = real
+    assert len(loops) == 3 and len({id(x) for x in loops}) == 1
 
 
 def test_a_failed_index_is_kept_and_retried(db, values, rag):
@@ -148,6 +191,7 @@ def test_delete(db, values, rag, tmp_path):
 
 def test_nothing_is_indexed_without_a_knowledge_base(db, values, monkeypatch, tmp_path):
     monkeypatch.setenv("UPLOAD_DIR", str(tmp_path))
+    monkeypatch.setenv("DOCLING_URL", "http://localhost:8092")   # Docling, but no Qdrant
     config.env_settings.cache_clear()
     config.refresh_settings()
     documents.upload("RICH", "guide.md", GUIDE, who=ADMIN)      # accepted, waits
@@ -172,3 +216,36 @@ def test_team_scopes_per_product_and_for_all(db, values):
     rows = db.query("SELECT name, new_value FROM audit_log WHERE what = 'team scopes' "
                     "ORDER BY id")
     assert [r["name"] for r in rows] == ["RICH", "all products", "RICH"]
+
+
+def test_a_search_result_as_ragent2_020_returns_it(db, monkeypatch):
+    """0.2.0 puts the document's name in a passage's metadata, and in a trace
+    entry's sources only: both must reach the draft."""
+    ns = types.SimpleNamespace
+    src = lambda name: ({"chunk_id": "x", "document_name": name, "page_number": None},)  # noqa: E731
+    result = ns(
+        chunks=(ns(chunk_id="c1", text="Use the Latest filter.", relation="DIRECT", score=3,
+                   reason="answers it", sources=src("OLE5 FAQ"),
+                   metadata={"document_name": "OLE5 FAQ", "section": "Search",
+                             "source_file": "OLE5_KB.md"}),),
+        diagnostics=ns(queries_tried=("search order",), stop_reason="enough_evidence",
+                       trace=(ns(relation="DIRECT", returned=True, sources=src("OLE5 FAQ")),
+                              ns(relation="IGNORE", returned=False, sources=src("OLE5 BRD")),
+                              ns(relation=None, returned=False, sources=src("OLE5 Guide")))))
+    asked = {}
+
+    class Index:
+        def find(self, question, **kw):
+            asked.update(kw)
+            return result
+
+    monkeypatch.setattr(retriever, "_tenant", lambda name: Index())
+    monkeypatch.setenv("KB_RERANK", "false")
+    config.env_settings.cache_clear()
+    config.refresh_settings()
+    r = retriever.retrieve("Why are results not newest first?", "OLE5")
+    assert asked == {"use_reranker": False}
+    e = r.evidence[0]
+    assert (e.document, e.section, e.source_file, e.relation) == (
+        "OLE5 FAQ", "Search", "OLE5_KB.md", "DIRECT")
+    assert r.considered == ["OLE5 BRD (ignore)", "OLE5 Guide (ungraded)"]

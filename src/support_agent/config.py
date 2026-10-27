@@ -279,6 +279,15 @@ class Settings(BaseSettings):
     def _no_trailing_slash(cls, v: str | None) -> str | None:
         return v.rstrip("/") if v else v
 
+    @field_validator("qdrant_url", "docling_url")
+    @classmethod
+    def _an_address(cls, v: str | None) -> str | None:
+        # A typo in .env ("DOCLING_URL=DOCLING_URL=http://...") otherwise
+        # surfaces only when the first document is indexed.
+        if v and not v.strip().lower().startswith(("http://", "https://")):
+            raise ValueError("must start with http:// or https://")
+        return v.strip().rstrip("/") if v else v
+
     # ---- accessors -----------------------------------------------------
     @staticmethod
     def _split(text: str | None) -> list[str]:

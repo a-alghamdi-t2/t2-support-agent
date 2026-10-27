@@ -136,7 +136,8 @@ def _index_once() -> dict[str, Any]:
     from support_agent.knowledge import documents
 
     s = get_settings()
-    off = _switch("indexer", bool(s.qdrant_url), why="the knowledge base is not configured")
+    off = _switch("indexer", bool(s.qdrant_url and s.docling_url),
+                  why="the knowledge base is not configured (QDRANT_URL, DOCLING_URL)")
     if off:
         return off
     indexed, failed = documents.index_pending()
@@ -172,7 +173,7 @@ def start() -> None:
     STATE["weekly"] = weekly
     indexer = LoopState("indexer", interval=INDEX_SECONDS)
     STATE["indexer"] = indexer
-    indexer.enabled = bool(s.qdrant_url)
+    indexer.enabled = bool(s.qdrant_url and s.docling_url)
     poller.enabled = s.poller_enabled and s.tickets_configured
     writer.enabled = s.writer_enabled
     weekly.enabled = s.weekly_enabled
