@@ -2,8 +2,9 @@
 
 Called by our API (component 10) on behalf of a staff member of the ticket
 system, named by their email. Nothing here talks to the ticket system except
-one check: before Approve & Send to a sender our copy says is pending, the
-ticket is read again, in case the contact was approved on their page since.
+one check: before Approve & Send to a sender our copy says is pending, or
+before approving spam, the ticket is read again, in case the contact was
+approved on their page since.
 
 Approving records the decision and queues the writes in ticket_writes; the
 writer (review/writer.py) sends them. A reviewer's click never waits on their
@@ -15,6 +16,8 @@ system being up, and a write that fails is retried without asking again.
                           the routing with an internal note holding the
                           reply for staff to send themselves
     approve(changes=...)  Edit: the reviewer's values, checked, then as above
+    approve() on spam     the sender, still a pending contact, is blocked and
+                          their open tickets closed (ContactMarkSpam)
     reject(reason)        nothing is written
     redraft(product)      Draft again for this product: the agent drafts the
                           ticket again for that product; the old draft is
@@ -60,7 +63,7 @@ class Approval:
     review_id: int
     outcome: str
     writes: list[str] = field(default_factory=list)
-    """"routing", and "reply" for Approve & Send. Empty for spam."""
+    """"routing", and "reply" for Approve & Send; "spam" for spam."""
     changed_fields: list[str] = field(default_factory=list)
 
 
@@ -153,9 +156,16 @@ def _check(final: dict, changed: set[str], agent: dict) -> None:
 def _contact_pending(row: dict, t2) -> bool:
     """Whether the ticket system still has the sender as a pending contact.
     Our copy may be behind: someone may have approved the contact on their
-    page since. Asked again only when our copy says pending."""
+    page since. Asked again only when our copy says pending; when it cannot
+    be asked, False (the writer holds the reply if it still is)."""
+    return (_contact_status(row, t2) or "").lower() == "pending"
+
+
+def _contact_status(row: dict, t2) -> str | None:
+    """The sender's contact status: ours when it is not pending, otherwise
+    read again from the ticket system. None when it could not be read."""
     if (row["customer_contact_status"] or "").lower() != "pending":
-        return False
+        return row["customer_contact_status"] or ""
     own = t2 is None
     try:
         if own:
@@ -165,7 +175,7 @@ def _contact_pending(row: dict, t2) -> bool:
     except Exception as exc:          # could not ask: the writer will hold it if needed
         log.warning("contact not checked", extra={"ticket": row["ticket_number"],
                                                   "error": str(exc)[:200]})
-        return False
+        return None
     finally:
         if own and t2 is not None:
             t2.close()
@@ -173,7 +183,7 @@ def _contact_pending(row: dict, t2) -> bool:
                      "customer_id = %s, last_synced_at = now() WHERE id = %s",
                      (ticket.customer_status or None, ticket.customer_org or None,
                       ticket.customer_id or None, row["ticket_id"]))
-    return ticket.customer_status.lower() == "pending"
+    return ticket.customer_status
 
 
 # ---------------------------------------------------------------------------
@@ -200,13 +210,18 @@ def approve(draft_id: int, *, who: str, send: bool = False, changes: dict | None
     if final["action"] == "spam" and row["action"] != "spam":
         raise ReviewError("only the agent proposes spam; use Mark as Spam on the ticket page")
 
-    # Spam, approved as spam: their Mark as Spam does the work, nothing is
-    # written by us.
+    # Spam, approved as spam: the sender is blocked and every open ticket of
+    # theirs closed, by their system's own spam service. Only for a sender
+    # still pending: someone approved on their page is a customer.
     if final["action"] == "spam":
         if send:
             raise ReviewError("a spam proposal has no reply to send")
+        status = _contact_status(row, t2)
+        if status is not None and status.lower() != "pending":
+            raise ReviewError(f"the sender is no longer a pending contact ({status or 'none'}): "
+                              "not spam. Reject the proposal, or draft it again for a product")
         return _record(row, final, who, outcome="approve", changed=[], diff={},
-                       comment=comment, send=False, writes=[])
+                       comment=comment, send=False, writes=[("spam", {"by": who})])
 
     if not final.get("product"):
         raise ReviewError("choose the product")
@@ -235,8 +250,25 @@ def approve(draft_id: int, *, who: str, send: bool = False, changes: dict | None
     product = options.product(final["product"])
     signed = signatures.sign(final["product"], reply) if reply else None
     reply_state = "sent" if send else ("to_send" if reply else "none")
-    urgent = postgres.query_one("SELECT agent_reason FROM draft_urgent WHERE draft_id = %s",
-                                (draft_id,))
+    kept = ((row["evidence"] or {}).get("held_reply") or {}).get("body")
+    if reply_state == "none" and kept:
+        # A routing whose draft had a reply the agent wrote: not sent, but
+        # in the note for the team it goes to.
+        reply_state, signed = "kept", kept
+    urgent = postgres.query_one("SELECT by_agent, agent_reason, keywords FROM draft_urgent "
+                                "WHERE draft_id = %s", (draft_id,))
+    if urgent:
+        why = ([f"Keywords: {', '.join(urgent['keywords'])}"] if urgent["keywords"] else []) \
+            + ([f"The agent: {urgent['agent_reason'] or 'judged it urgent'}"]
+               if urgent["by_agent"] else [])
+        # Who was alerted, for this ticket and not just this draft: a redraft
+        # within a day does not alert again, but the people were told.
+        sent_to = [r["to_address"] for r in postgres.query(
+            "SELECT to_address, min(id) FROM urgent_emails WHERE ticket_id = %s "
+            "AND status = 'sent' GROUP BY to_address ORDER BY min(id)", (row["ticket_id"],))]
+        why.append(f"Alert sent to: {', '.join(sent_to)}" if sent_to
+                   else "Alert sent to: nobody (no recipients, or the email failed)")
+        urgent = {"agent_reason": "\n".join(why)}
     body = ticket_note.render(final=final, product_name=product.value if product else final["product"],
                               reviewer=who, reply=reply_state, changes=diff,
                               urgent_reason=urgent["agent_reason"] if urgent else None,

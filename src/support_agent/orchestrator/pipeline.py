@@ -63,8 +63,11 @@ def draft(ticket_id: int, *, product: str | None = None,
             why, summary = choice.reason, choice.summary
             corrections = list(chosen.corrections)
             if chosen.spam:
-                values = {**base, "action": Action.SPAM.value, "product": code,
-                          "product_sure": sure, "summary": summary,
+                # No product: the model has to name one, and for spam it is a
+                # guess that means nothing. It stays in the trace. A reviewer
+                # who disagrees chooses the product in Edit.
+                values = {**base, "action": Action.SPAM.value, "product": None,
+                          "product_sure": True, "summary": summary,
                           "reasoning": choice.spam_reason or choice.reason}
                 return _save(ticket_id, values, started, trace, corrections=corrections)
         else:
@@ -118,9 +121,12 @@ def _save(ticket_id: int, values: dict, started: float, trace: list, *,
     values["latency_ms"] = int((time.perf_counter() - started) * 1000)
     trace.append({"step": "done", "ms": values["latency_ms"],
                   "tokens": _tokens(trace)})
-    return store.save(ticket_id, values,
-                      evidence=store.evidence_json(retrievals or [], corrections, held_reply),
-                      trace=trace, urgent_reason=urgent_reason)
+    draft_id = store.save(ticket_id, values,
+                          evidence=store.evidence_json(retrievals or [], corrections, held_reply),
+                          trace=trace, urgent_reason=urgent_reason)
+    from support_agent.notify import urgent           # keywords, and the alert email
+    urgent.check(draft_id)
+    return draft_id
 
 
 def _tokens(trace: list) -> dict[str, int]:

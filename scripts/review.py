@@ -54,8 +54,11 @@ def _list() -> None:
         what = r["action"] + (" (asks for more)" if r["reply_kind"] == "ask_more" else "")
         sure = "" if r["product_sure"] else " NOT SURE"
         print(f"  {r['ticket_number']}  {r['title'][:40]!r}")
-        print(f"      {what}: {r['product'] or '-'}{sure} / {r['queue'] or '-'} / "
-              f"{r['type'] or '-'} / {r['subtype'] or '-'}   sender {r['contact'] or '-'}")
+        if r["action"] == "spam":
+            print(f"      spam   sender {r['contact'] or '-'}")
+        else:
+            print(f"      {what}: {r['product'] or '-'}{sure} / {r['queue'] or '-'} / "
+                  f"{r['type'] or '-'} / {r['subtype'] or '-'}   sender {r['contact'] or '-'}")
     writes = postgres.query(
         """
         SELECT w.id, w.kind, w.status, w.attempts, w.last_error, t.ticket_number

@@ -146,7 +146,7 @@ def test_spam_stops_after_the_product_step(db, ticket, script, kb):
     script.product.update(spam=True, spam_reason="An SEO offer")
     d = _draft(db, pipeline.draft(ticket))
     assert (d["action"], d["product"], d["queue"], d["reasoning"]) == (
-        "spam", "RICH", None, "An SEO offer")
+        "spam", None, None, "An SEO offer")             # the model's product guess: dropped
     assert [c[0] for c in script.calls] == ["product"] and kb == []
 
 
@@ -195,6 +195,14 @@ def test_a_route_keeps_the_reply_it_wrote(db, ticket, script, kb):
         "kind": "ask_more", "body": "مرحبا\n\nأرسلوا العقد.",
         "next_state": "Waiting For Customer Response", "documents": ["RICH-sender-names.md"],
         "why": "the agent chose to route"}
+
+
+@pytest.mark.parametrize("state", ["New", "open"])
+def test_a_routing_is_never_left_new_or_open(db, ticket, script, kb, state):
+    script.decision.update(action="route", reply_kind=None, reply_body=None, next_state=state)
+    d = _draft(db, pipeline.draft(ticket))
+    assert d["next_state"] == "Waiting for Concerned Department"
+    assert any(c.startswith("next_state:") for c in d["evidence"]["corrections"])
 
 
 def test_inferential_evidence_holds_the_reply_back(db, ticket, script, kb, monkeypatch):

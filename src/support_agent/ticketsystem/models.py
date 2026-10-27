@@ -62,6 +62,10 @@ class HistoryEntry:
     """The justification written when a person reassigned the ticket."""
     team: str = ""
     """The responsible team named in that justification."""
+    sequence: int | None = None
+    """Their order for events with the same time (a reassignment before the
+    note added with it). Empty on events from before they added it; those
+    come first."""
 
     @property
     def is_queue_move(self) -> bool:
@@ -96,6 +100,9 @@ class Ticket:
     dynamic_fields: dict[str, str] = field(default_factory=dict)
     articles: tuple[Article, ...] = ()
     history: tuple[HistoryEntry, ...] = ()
+    assigned_staff: str = ""
+    """Who the ticket is assigned to (their email, else their name), or ""
+    when nobody is. As read: someone can take it a moment later."""
 
     @property
     def is_closed(self) -> bool:
@@ -168,3 +175,12 @@ class WriteResult:
     no article was written."""
     message_id: str | None = None
     """The sent email's ID (Gmail's, or the SMTP Message-ID)."""
+
+
+@dataclass(frozen=True)
+class SpamResult:
+    """ContactMarkSpam: the sender blocked and their open tickets closed."""
+    ticket_id: str
+    customer_id: str
+    contact_status: str
+    tickets_closed: int

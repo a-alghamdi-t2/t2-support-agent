@@ -20,7 +20,10 @@ from support_agent.orchestrator.contracts import (Action, Confidence, Decision,
                                                   ProductChoice, ReplyKind, SubtypeChoice)
 
 ROUTED_STATE = "Waiting for Concerned Department"
-"""Where a routed ticket goes when the model leaves it Open."""
+"""Where a routed ticket goes when the model leaves it New or Open."""
+UNROUTED_STATES = ("new", "open")
+"""Statuses that say nobody has the ticket yet: wrong for a ticket just sent
+to a team."""
 
 
 def snap(value: str | None, allowed: list[str]) -> str | None:
@@ -182,7 +185,9 @@ def decision(d: Decision, code: str, retrievals: list[Retrieval]) -> tuple[Decis
             corrections.append("reply kept for the reviewer, not sent: the action is route")
         d.reply_body = None
         d.reply_kind = None
-        if (d.next_state or "").lower() == "open" and ROUTED_STATE in states:
+        if (d.next_state or "").lower() in UNROUTED_STATES and ROUTED_STATE in states:
+            corrections.append(f"next_state: {d.next_state} on a routing, "
+                               f"using {ROUTED_STATE!r}")
             d.next_state = ROUTED_STATE
     else:
         if not d.reply_body or not d.reply_body.strip():

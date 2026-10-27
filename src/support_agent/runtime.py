@@ -1,11 +1,13 @@
 """Background work, inside the server process.
 
-Three loops: one checks the intake and drafts, one writes approved drafts to
-the ticket system, one runs the Friday history update. All run on a worker thread -- deciding a ticket is a minute of model time and must
-not touch the event loop -- and all survive their own failures, because a
-knowledge base that is down for ten minutes should not stop the console.
+Four loops: one checks the intake and drafts, one writes approved drafts to
+the ticket system, one indexes uploaded knowledge base documents, one runs the
+Friday history update. All run on a worker thread -- deciding a ticket is a
+minute of model time and must not touch the event loop -- and all survive
+their own failures, because a knowledge base that is down for ten minutes
+should not stop the console.
 
-All three are always started, and each pass reads its switch first
+All of them are always started, and each pass reads its switch first
 (POLLER_ENABLED, WRITER_ENABLED, WEEKLY_ENABLED, which the Settings page can
 change): turned off, a pass does nothing; turned back on, the next pass works.
 No restart either way.
@@ -127,6 +129,20 @@ def _write_once() -> dict[str, Any]:
     return {"sent": sent, "failed": failed}
 
 
+INDEX_SECONDS = 30.0
+
+
+def _index_once() -> dict[str, Any]:
+    from support_agent.knowledge import documents
+
+    s = get_settings()
+    off = _switch("indexer", bool(s.qdrant_url), why="the knowledge base is not configured")
+    if off:
+        return off
+    indexed, failed = documents.index_pending()
+    return {"indexed": indexed, "failed": failed}
+
+
 def _weekly_once() -> dict[str, Any]:
     from support_agent.history import weekly
 
@@ -154,13 +170,17 @@ def start() -> None:
     STATE["poller"] = poller
     STATE["writer"] = writer
     STATE["weekly"] = weekly
+    indexer = LoopState("indexer", interval=INDEX_SECONDS)
+    STATE["indexer"] = indexer
+    indexer.enabled = bool(s.qdrant_url)
     poller.enabled = s.poller_enabled and s.tickets_configured
     writer.enabled = s.writer_enabled
     weekly.enabled = s.weekly_enabled
     if s.poller_enabled and not s.tickets_configured:
         log.warning("poller waiting: the ticket system is not configured")
 
-    for state, work in ((poller, _poll_once), (writer, _write_once), (weekly, _weekly_once)):
+    for state, work in ((poller, _poll_once), (writer, _write_once), (indexer, _index_once),
+                        (weekly, _weekly_once)):
         _TASKS.append(asyncio.create_task(_loop(state, work), name=state.name))
 
 

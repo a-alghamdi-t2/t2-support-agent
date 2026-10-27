@@ -11,6 +11,7 @@ in its user-secrets, and no Gmail connected.
 
 from __future__ import annotations
 
+import html
 import re
 import sys
 import time
@@ -27,12 +28,18 @@ class Save:
     async def handle_DATA(self, server, session, envelope):
         msg = message_from_bytes(envelope.content, policy=policy.default)
         body = msg.get_body(preferencelist=("html", "plain"))
-        html = body.get_content() if body else ""
+        page = body.get_content() if body else ""
+        if body is not None and body.get_content_subtype() == "plain":
+            # A plain-text email (our urgent alerts): kept as written, line
+            # breaks and all, instead of run together by the browser.
+            page = ('<meta charset="utf-8"><pre dir="auto" style="white-space: pre-wrap; '
+                    'font: 14px/1.5 Segoe UI, Arial, sans-serif">'
+                    f"{html.escape(page)}</pre>")
         subject = str(msg["Subject"] or "(no subject)")
         name = re.sub(r"[^\w\-]+", "_", subject)[:60]
         OUT.mkdir(exist_ok=True)
         path = OUT / f"{datetime.now():%H%M%S}-{name}.html"
-        path.write_text(html, encoding="utf-8")
+        path.write_text(page, encoding="utf-8")
         print(f"{datetime.now():%H:%M:%S}  to {', '.join(envelope.rcpt_tos)}")
         print(f"          from {msg['From']}")
         print(f"          subject {subject}")

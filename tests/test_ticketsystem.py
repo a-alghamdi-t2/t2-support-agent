@@ -215,9 +215,7 @@ def test_an_internal_note_says_no_email(c):
     assert r.email_sent is False and r.message_id is None
 
 
-@pytest.mark.parametrize("codes", [False, True])
-def test_reply_refusals_before_sending_are_told_apart(c, codes):
-    fake.email_codes = codes
+def test_reply_refusals_before_sending_are_told_apart(c):
     tid = fake.add_email("One", "x")
     with pytest.raises(T2Error) as e:                     # the sender is still Pending
         c.reply(tid, subject="s", body="b")
@@ -226,7 +224,39 @@ def test_reply_refusals_before_sending_are_told_apart(c, codes):
     with pytest.raises(T2Error) as e:                     # not classified yet
         c.reply(tid, subject="s", body="b")
     assert e.value.email_not_tried == "not classified"
+    fake.T[tid].update(requires=False, notifications=False)
+    with pytest.raises(T2Error) as e:                     # the customer's notifications off
+        c.reply(tid, subject="s", body="b")
+    assert e.value.email_not_tried == "notifications off"
+    fake.T[tid]["notifications"] = True
+    fake.mail_fails.append("not_attempted")
+    with pytest.raises(T2Error) as e:                     # another check before sending
+        c.reply(tid, subject="s", body="b")
+    assert e.value.email_not_tried == "not attempted" and not e.value.email_uncertain
     assert fake.sent_mail == []
+
+
+def test_assigned_staff_and_history_order(c):
+    tid = fake.add_email("One", "x")
+    assert c.get(tid).assigned_staff == ""
+    fake.T[tid]["assigned_staff"] = "omar@t2.sa"
+    c.update(tid, product="RiCH", queue="RiCH Support", note=Note("s", "b"))
+    t = c.get(tid)
+    assert t.assigned_staff == "omar@t2.sa"
+    seq = [h.sequence for h in t.history]
+    assert None not in seq and seq == sorted(seq)
+    assert [h.action for h in t.history][-2:] == ["Reassigned", "Internal Note Added"]
+
+
+def test_mark_spam(c):
+    tid = fake.add_email("Offer", "Cheap SEO", "seo@spam.example")
+    other = fake.add_email("Offer again", "Cheaper SEO", "seo@spam.example")
+    r = c.mark_spam(tid)
+    assert (r.contact_status, r.tickets_closed, r.ticket_id) == ("Blocked", 2, tid.lower())
+    assert fake.T[other]["status"] == "closed successful"
+    with pytest.raises(T2Error) as e:                     # not twice
+        c.mark_spam(tid)
+    assert e.value.code == "ContactMarkSpam.ContactNotPending" and e.value.refused
 
 
 def test_a_reply_that_may_have_gone_out_is_uncertain(c):

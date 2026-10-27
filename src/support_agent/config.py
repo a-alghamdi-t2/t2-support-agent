@@ -102,6 +102,9 @@ class Settings(BaseSettings):
     # but not sent. With no SMTP_HOST, nothing is sent either.
     smtp_host: str | None = None
     smtp_port: int = 587
+    smtp_starttls: bool = True
+    """Encrypt with STARTTLS on ports other than 465. Off only for a local
+    mail catcher (scripts/mailcatcher.py), which has none."""
     mail_from: str | None = None
     mail_username: str | None = None
     mail_password: SecretStr | None = None
@@ -149,7 +152,13 @@ class Settings(BaseSettings):
     qdrant_url: str | None = None
     docling_url: str | None = None
     upload_dir: Path = REPO_ROOT / "data" / "uploads"
+    """Uploaded knowledge base documents, one folder per product."""
     max_upload_mb: int = 25
+
+    kb_rerank: bool = True
+    """Rerank the knowledge base's candidates (RAGent2 0.2.0 can skip it).
+    Reranking runs on CPU and is most of a search's time; off is faster and
+    may be less precise."""
 
     kb_candidate_pool: int = 10
     """How many candidates the reranker scores."""

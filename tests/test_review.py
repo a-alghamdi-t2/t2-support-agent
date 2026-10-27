@@ -81,6 +81,11 @@ def test_approve_and_send(db, t2, ticket, live):
         "Waiting For Customer Response")
     note, reply = t["threads"][-2:]
     assert note["internal"] and "Approved by sara@t2.sa" in note["body"]
+    body = note["body"]
+    order = [body.index(x) for x in ("REQUEST", "CLASSIFICATION", "QUEUE REASON",
+                                     "AGENT REASONING", "STILL TO FIND OUT", "SUGGESTED REPLY")]
+    assert order == sorted(order) and "Sent to the customer as its own message." in body
+    assert body.count("=" * 60) == 6                 # a rule before each section
     assert note["from"] == "Support Agent"          # not shown as the customer
     assert not reply["internal"] and reply["body"].endswith("فريق دعم ريتش")   # Arabic reply
     mail = fake.sent_mail[-1]
@@ -101,7 +106,8 @@ def test_approve_and_draft_keeps_the_reply_in_the_note(db, t2, ticket, live):
     assert a.writes == ["routing"]
     writer.send_pending(t2=t2)
     note = fake.T[ticket["t2"]]["threads"][-1]
-    assert note["internal"] and "the reply below was NOT sent" in note["body"]
+    assert note["internal"] and "The reply below was NOT sent." in note["body"]
+    assert "Not sent: check it and send it from this page." in note["body"]
     assert "Please send the signed contract.\n\nT2 Support" in note["body"]
     assert fake.sent_mail == []
 
@@ -114,6 +120,31 @@ def test_approve_and_send_waits_for_a_pending_contact(db, t2, ticket):
     assert actions.approve(d, who=SARA, send=True, t2=t2).writes == ["routing", "reply"]
     assert db.query_one("SELECT customer_contact_status FROM tickets")[
         "customer_contact_status"] == "Active"       # our copy caught up
+
+
+def test_a_routing_keeps_the_agents_reply_in_the_note(db, t2, ticket, live):
+    d = _draft(db, ticket, action="route", reply_kind=None, reply_body=None,
+               evidence=json.dumps({"held_reply": {"body": "Please send the contract."}}))
+    actions.approve(d, who=SARA)
+    writer.send_pending(t2=t2)
+    note = fake.T[ticket["t2"]]["threads"][-1]["body"]
+    assert "Routed; nothing was sent to the customer." in note
+    assert "Not sent: the ticket was routed." in note and "Please send the contract." in note
+
+
+def test_the_note_says_why_urgent_and_who_was_alerted(db, t2, ticket, live):
+    first = _draft(db, ticket, status="superseded")
+    d = _draft(db, ticket)
+    db.execute("INSERT INTO draft_urgent (draft_id, by_keyword, keywords, by_agent, agent_reason) "
+               "VALUES (%s, true, %s, true, 'Sender names stopped')", (d, ["متوقف"]))
+    for to, status in [("oncall@t2.sa", "sent"), ("manager@t2.sa", "failed")]:
+        db.execute("INSERT INTO urgent_emails (draft_id, ticket_id, to_address, subject, body, "
+                   "status) VALUES (%s, %s, %s, 's', 'b', %s)", (first, ticket["id"], to, status))
+    actions.approve(d, who=SARA)
+    writer.send_pending(t2=t2)
+    note = fake.T[ticket["t2"]]["threads"][-1]["body"]
+    assert ("URGENT\nKeywords: متوقف\nThe agent: Sender names stopped\n"
+            "Alert sent to: oncall@t2.sa") in note       # an earlier draft's alert counts
 
 
 def test_a_route_has_no_reply_to_send(db, ticket):
@@ -227,19 +258,63 @@ def test_draft_again_that_fails_leaves_the_old_draft_waiting(db, ticket, monkeyp
     assert db.query_one("SELECT status FROM drafts WHERE id = %s", (d,))["status"] == "pending"
 
 
-def test_spam_is_approved_without_writing(db, t2, ticket, live):
-    d = _draft(db, ticket, action="spam", reply_kind=None, reply_body=None, queue=None,
-               type=None, subtype=None, conclusions=None)
+def _spam(db, ticket) -> int:
+    return _draft(db, ticket, action="spam", product=None, reply_kind=None, reply_body=None,
+                  queue=None, type=None, subtype=None, conclusions=None, next_state=None,
+                  priority=None)
+
+
+def test_spam_blocks_the_sender_and_closes_their_tickets(db, t2, ticket, live):
+    other = fake.add_email("Another offer", "Cheap SEO", "nora@alwaha-clinics.sa")
+    d = _spam(db, ticket)
     with pytest.raises(actions.ReviewError):
         actions.approve(d, who=SARA, send=True)
-    a = actions.approve(d, who=SARA)
-    assert a.writes == [] and writer.send_pending(t2=t2) == (0, 0)
+    a = actions.approve(d, who=SARA, t2=t2)
+    assert a.writes == ["spam"]
+    assert writer.send_pending(t2=t2) == (1, 0)
+    w = _writes(db, d)["spam"]
+    assert w["status"] == "sent" and w["payload"]["tickets_closed"] == 2
+    for tid in (ticket["t2"], other):
+        assert (fake.T[tid]["contact"], fake.T[tid]["status"]) == ("Blocked", "closed successful")
+    assert db.query_one("SELECT customer_contact_status FROM tickets")[
+        "customer_contact_status"] == "Blocked"
+    assert fake.T[ticket["t2"]]["threads"][-1]["customer"]      # no note, no email
+    assert writer.send_pending(t2=t2) == (0, 0)                 # never twice
+
+
+def test_spam_is_refused_for_a_sender_approved_since(db, t2, ticket, live):
+    d = _spam(db, ticket)
+    _active(ticket)                                           # approved on their page
+    with pytest.raises(actions.ReviewError, match="no longer a pending contact"):
+        actions.approve(d, who=SARA, t2=t2)
+    db.execute("UPDATE drafts SET status = 'superseded' WHERE id = %s", (d,))
+    db.execute("UPDATE tickets SET customer_contact_status = 'Pending'")
+    fake.T[ticket["t2"]]["contact"] = "Pending"
+    d2 = _spam(db, ticket)
+    actions.approve(d2, who=SARA, t2=t2)
+    _active(ticket)                                           # approved after our approval
+    writer.send_pending(t2=t2)
+    w = _writes(db, d2)["spam"]
+    assert w["status"] == "failed" and "no longer a pending contact" in w["last_error"]
+    assert fake.T[ticket["t2"]]["status"] == "Open"
+
+
+def test_spam_with_no_answer_is_checked_on_the_ticket(db, t2, ticket, live):
+    d = _spam(db, ticket)
+    actions.approve(d, who=SARA, t2=t2)
+    fake.fail_next.append(502)                  # no answer: the sender is still pending
+    assert writer.send_pending(t2=t2) == (0, 1)
+    assert _writes(db, d)["spam"]["status"] == "pending"     # so it did not happen: again
+    assert writer.send_pending(t2=t2) == (1, 0)
+    assert fake.T[ticket["t2"]]["contact"] == "Blocked"
 
 
 def test_spam_the_reviewer_disagrees_with_is_routed(db, ticket):
-    d = _draft(db, ticket, action="spam", reply_kind=None, reply_body=None, queue=None,
-               type=None, subtype=None, conclusions=None)
-    a = actions.approve(d, who=SARA, changes={"action": "route", "queue": "RiCH Support"})
+    d = _spam(db, ticket)
+    with pytest.raises(actions.ReviewError, match="choose the product"):
+        actions.approve(d, who=SARA, changes={"action": "route"})
+    a = actions.approve(d, who=SARA, changes={"action": "route", "product": "RICH",
+                                              "queue": "RiCH Support"})
     assert a.writes == ["routing"] and a.outcome == "edit"
 
 
@@ -254,17 +329,20 @@ def test_dry_run_writes_nothing(db, t2, ticket):
     assert fake.T[ticket["t2"]]["queue"] is None
 
 
-def test_a_ticket_someone_handled_meanwhile_is_left_alone(db, t2, ticket, live):
+@pytest.mark.parametrize("change, why", [
+    ({"queue": "RiCH Technical"}, "put in RiCH Technical"),      # a person routed it first
+    ({"assigned_staff": "omar@t2.sa"}, "assigned to omar@t2.sa"),   # or took it
+])
+def test_a_ticket_someone_handled_meanwhile_is_left_alone(db, t2, ticket, live, change, why):
     _active(ticket)
     d = _draft(db, ticket)
     actions.approve(d, who=SARA, send=True, t2=t2)
-    fake.T[ticket["t2"]]["queue"] = "RiCH Technical"         # a person routed it first
+    fake.T[ticket["t2"]].update(change)
     writer.send_pending(t2=t2)
     w = _writes(db, d)
-    assert w["routing"]["status"] == "failed" and "put in RiCH Technical" in (
-        w["routing"]["last_error"])
+    assert w["routing"]["status"] == "failed" and why in w["routing"]["last_error"]
     assert w["reply"]["status"] == "failed" and fake.sent_mail == []
-    assert fake.T[ticket["t2"]]["queue"] == "RiCH Technical"
+    assert fake.T[ticket["t2"]]["product"] == "EMAIL"
 
 
 def test_a_reply_held_until_the_contact_is_approved(db, t2, ticket, live):
@@ -280,6 +358,18 @@ def test_a_reply_held_until_the_contact_is_approved(db, t2, ticket, live):
     actions.send_again(w["id"], who=SARA)
     assert writer.send_pending(t2=t2) == (1, 0)
     assert _writes(db, d)["reply"]["status"] == "sent" and len(fake.sent_mail) == 1
+
+
+def test_a_reply_refused_before_sending_is_held(db, t2, ticket, live):
+    _active(ticket)
+    d = _draft(db, ticket)
+    actions.approve(d, who=SARA, send=True, t2=t2)
+    fake.mail_fails.append("not_attempted")              # say, no customer address
+    assert writer.send_pending(t2=t2) == (1, 1)
+    w = _writes(db, d)["reply"]
+    assert w["status"] == "held" and "check the customer's email address" in w["last_error"]
+    actions.send_again(w["id"], who=SARA)
+    assert writer.send_pending(t2=t2) == (1, 0) and len(fake.sent_mail) == 1
 
 
 def test_an_email_that_may_have_gone_is_never_sent_twice(db, t2, ticket, live):

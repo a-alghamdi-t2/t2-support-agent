@@ -1,6 +1,6 @@
 """The T2 Ticketing System's TicketAPI: the only way the agent reaches it.
 
-Five operations, each a POST of JSON to <T2_BASE_URL>/<Operation> with the
+Six operations, each a POST of JSON to <T2_BASE_URL>/<Operation> with the
 API user and password in the body:
 
     TicketSearch     ticket IDs matching filters (the intake, closed tickets)
@@ -10,6 +10,8 @@ API user and password in the body:
     TicketLookupsGet the products, queues, types, subtypes with their
                      reasons, statuses and priorities the system has now
     TicketCreate     tests only; off in production (AllowTicketCreate)
+    ContactMarkSpam  block a pending sender and close their open tickets, after
+                     a reviewer approves the agent's spam proposal
 
 Their API answers HTTP 200 with an "Error" object when it refuses something;
 that becomes T2Error. Times go both ways as "yyyy-MM-dd HH:mm:ss" in Riyadh
@@ -39,8 +41,8 @@ import httpx
 from support_agent.config import Settings, get_settings
 from support_agent.logging import get_logger
 from support_agent.ticketsystem.models import (
-    Article, Attachment, HistoryEntry, Lookups, Note, ProductValues, Subtype, Ticket,
-    WriteResult,
+    Article, Attachment, HistoryEntry, Lookups, Note, ProductValues, SpamResult, Subtype,
+    Ticket, WriteResult,
 )
 
 log = get_logger(__name__)
@@ -82,18 +84,10 @@ class T2Error(RuntimeError):
     @property
     def email_not_tried(self) -> str | None:
         """For a reply refused before anything was sent, why: the contact is
-        pending, the ticket is not classified, or the customer's email
-        notifications are off. A person fixes it and it can be sent again."""
-        if self.code in EMAIL_NOT_TRIED:
-            return EMAIL_NOT_TRIED[self.code]
-        if self.code == "TicketUpdate.EmailFailed":
-            # Until their separate codes are live, the message says which.
-            text = self.message.lower()
-            if "pending contact" in text:
-                return "contact pending"
-            if "classify this" in text:
-                return "not classified"
-        return None
+        pending, the ticket is not classified, the customer's email
+        notifications are off, or another check before sending failed. A
+        person fixes it and it can be sent again."""
+        return EMAIL_NOT_TRIED.get(self.code)
 
     @property
     def email_uncertain(self) -> bool:
@@ -109,8 +103,11 @@ EMAIL_NOT_TRIED = {
     "TicketUpdate.ContactPending": "contact pending",
     "TicketUpdate.NotClassified": "not classified",
     "TicketUpdate.NotificationsDisabled": "notifications off",
+    "TicketUpdate.EmailNotAttempted": "not attempted",
 }
-"""Their codes for a reply refused before sending (requested, A6)."""
+"""Their codes for a reply refused before any email was attempted. Any other
+refusal of a reply (EmailFailed, EmailPersistenceFailed, or a code we do not
+know) may have reached the customer and is never sent again by itself."""
 
 
 def _zone(name: str):
@@ -350,6 +347,16 @@ class T2Client:
         changes, so a failed email undoes nothing else. Never retried here."""
         return self.update(ticket_id, note=Note(subject, body, visible=True))
 
+    def mark_spam(self, ticket_id: str) -> SpamResult:
+        """Block the ticket's sender, who must still be a pending contact, and
+        close their open tickets. Contact-wide, and not repeated: after no
+        answer, TicketGet's CustomerContactStatus says whether it happened."""
+        data = self._call("ContactMarkSpam", {"TicketID": ticket_id})
+        return SpamResult(ticket_id=str(data.get("TicketID") or ticket_id).lower(),
+                          customer_id=str(data.get("CustomerID") or "").lower(),
+                          contact_status=str(data.get("ContactStatus") or ""),
+                          tickets_closed=int(data.get("TicketsClosed") or 0))
+
     def create(self, *, title: str, customer_email: str, body: str, product: str,
                queue: str | None = None, subject: str | None = None,
                state: str | None = None, priority: str | None = None,
@@ -407,6 +414,7 @@ class T2Client:
             dynamic_fields=fields,
             articles=tuple(self._article_from(a) for a in t.get("Article") or []),
             history=tuple(self._history_from(h) for h in t.get("History") or []),
+            assigned_staff=_s(t, "AssignedStaff"),
         )
 
     def _article_from(self, a: dict[str, Any]) -> Article:
@@ -431,7 +439,8 @@ class T2Client:
             details=_s(h, "Details"), by=_s(h, "By"),
             from_queue=_s(h, "FromQueue"), to_queue=_s(h, "ToQueue"),
             from_state=_s(h, "FromState"), to_state=_s(h, "ToState"),
-            reason=_s(h, "Reason"), team=_s(h, "ResponsibleTeam"))
+            reason=_s(h, "Reason"), team=_s(h, "ResponsibleTeam"),
+            sequence=int(h["Sequence"]) if str(h.get("Sequence") or "").isdigit() else None)
 
     @staticmethod
     def _lookups(data: dict[str, Any]) -> Lookups:

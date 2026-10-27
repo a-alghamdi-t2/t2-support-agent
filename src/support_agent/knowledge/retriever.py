@@ -84,6 +84,11 @@ def _tenant(name: str) -> Any:
     return _ragent().tenant(name)
 
 
+def tenant(code: str) -> Any:
+    """The product's index in RAGent2, for adding and removing documents."""
+    return _tenant(get_settings().kb_tenant(code))
+
+
 def _to_evidence(chunk: Any) -> Evidence:
     meta = getattr(chunk, "metadata", None) or {}
     return Evidence(
@@ -123,7 +128,9 @@ def retrieve(question: str, code: str) -> Retrieval:
     tenant = get_settings().kb_tenant(code)
 
     try:
-        result = _tenant(tenant).find(question)
+        # use_reranker is RAGent2 0.2.0's; left out when on, so 0.1.4 works too.
+        kwargs = {} if get_settings().kb_rerank else {"use_reranker": False}
+        result = _tenant(tenant).find(question, **kwargs)
     except Exception as exc:
         elapsed = int((time.perf_counter() - started) * 1000)
         log.exception("retrieval failed", extra={"ms": elapsed, "tenant": tenant})

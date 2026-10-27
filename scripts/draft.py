@@ -38,11 +38,14 @@ def show(draft_id: int, *, steps: bool = False) -> None:
     total = sum(tokens.values())
     print(f"\n{d['ticket_number']}  {d['title']!r}  "
           f"(draft {d['id']}, {d['latency_ms'] / 1000:.1f} s, {total:,} tokens)")
-    sure = "sure" if d["product_sure"] else "NOT SURE"
-    print(f"  product      {_name(d['product'])}  {sure}")
+    if d["action"] == "spam":
+        print("  product      - (spam)")
+    else:
+        sure = "sure" if d["product_sure"] else "NOT SURE"
+        print(f"  product      {_name(d['product'])}  {sure}")
     # Step 1's reason and the other possible product are kept in the trace.
     step1 = next((t for t in reversed(d["trace"] or []) if t.get("step") == "product"), None)
-    if step1:
+    if step1 and d["action"] != "spam":
         proposed = step1.get("proposed") or {}
         why = proposed.get("reason") or "-"
         if proposed.get("other"):
@@ -75,10 +78,16 @@ def show(draft_id: int, *, steps: bool = False) -> None:
         print(f"  searched     {s['query']!r} -> {s['verdict']} ({found})")
     for c in ev.get("corrections", []):
         print(f"  corrected    {c}")
-    urgent = postgres.query_one("SELECT agent_reason FROM draft_urgent WHERE draft_id = %s",
-                                (draft_id,))
+    urgent = postgres.query_one("SELECT by_agent, agent_reason, keywords FROM draft_urgent "
+                                "WHERE draft_id = %s", (draft_id,))
     if urgent:
-        print(f"  URGENT       {urgent['agent_reason']}")
+        if urgent["keywords"]:
+            print(f"  URGENT       keyword: {', '.join(urgent['keywords'])}")
+        if urgent["by_agent"]:
+            print(f"  URGENT       agent: {urgent['agent_reason'] or 'judged it urgent'}")
+        for e in postgres.query("SELECT to_address, status FROM urgent_emails "
+                                "WHERE draft_id = %s ORDER BY id", (draft_id,)):
+            print(f"  alerted      {e['to_address']}: {e['status']}")
     reply = d["reply_body"] or ((ev.get("held_reply") or {}).get("body"))
     if reply:
         label = "reply" if d["reply_body"] else (

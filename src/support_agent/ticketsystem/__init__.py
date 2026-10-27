@@ -2,11 +2,11 @@
 
 from support_agent.ticketsystem.client import T2Client, T2Error, connect
 from support_agent.ticketsystem.models import (
-    Article, Attachment, HistoryEntry, Lookups, Note, ProductValues, Subtype, Ticket,
-    WriteResult,
+    Article, Attachment, HistoryEntry, Lookups, Note, ProductValues, SpamResult, Subtype,
+    Ticket, WriteResult,
 )
 
 __all__ = [
-    "Article", "Attachment", "HistoryEntry", "Lookups", "Note", "ProductValues", "Subtype",
-    "T2Client", "T2Error", "Ticket", "WriteResult", "connect",
+    "Article", "Attachment", "HistoryEntry", "Lookups", "Note", "ProductValues", "SpamResult",
+    "Subtype", "T2Client", "T2Error", "Ticket", "WriteResult", "connect",
 ]

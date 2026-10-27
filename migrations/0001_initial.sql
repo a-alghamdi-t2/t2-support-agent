@@ -12,7 +12,7 @@ END;
 $$;
 
 CREATE TYPE article_party AS ENUM ('request', 'other');
-CREATE TYPE doc_status    AS ENUM ('pending', 'indexed', 'failed');
+CREATE TYPE doc_status    AS ENUM ('pending', 'indexing', 'indexed', 'failed');
 CREATE TYPE draft_action  AS ENUM ('answer', 'route', 'spam');
 CREATE TYPE draft_status  AS ENUM ('pending', 'approved', 'rejected', 'superseded');
 CREATE TYPE reply_kind    AS ENUM ('answer', 'ask_more');
@@ -279,11 +279,12 @@ CREATE INDEX idx_reviews_by ON reviews (lower(reviewed_by), created_at);
 
 -- What an approved draft writes to the ticket, retried until it is written:
 -- the routing with the internal note, then for Approve & Send the reply,
--- which the ticket system emails to the customer.
+-- which the ticket system emails to the customer. For an approved spam
+-- proposal, the spam write: the sender blocked and their open tickets closed.
 CREATE TABLE ticket_writes (
     id            bigserial PRIMARY KEY,
     draft_id      bigint NOT NULL REFERENCES drafts(id),
-    kind          text NOT NULL DEFAULT 'routing' CHECK (kind IN ('routing', 'reply')),
+    kind          text NOT NULL DEFAULT 'routing' CHECK (kind IN ('routing', 'reply', 'spam')),
     payload       jsonb NOT NULL,
     status        write_status NOT NULL DEFAULT 'pending',
     attempts      smallint NOT NULL DEFAULT 0,

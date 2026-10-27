@@ -1,7 +1,8 @@
 """Writing approved drafts to the ticket.
 
 Runs every WRITER_SECONDS (runtime.py), and right after an approval. Each
-approved draft has a routing write, and for Approve & Send a reply write:
+approved draft has a routing write, and for Approve & Send a reply write; an
+approved spam proposal has a spam write only:
 
     routing   product, queue, type, subtype, Conclusions, status, priority and
               the internal note, in one TicketUpdate
@@ -9,6 +10,10 @@ approved draft has a routing write, and for Approve & Send a reply write:
               customer. Only after the routing is written: the ticket must be
               classified before it can be replied to, and an email that fails
               then undoes nothing but itself.
+    spam      ContactMarkSpam: the sender, still a pending contact, blocked
+              and their open tickets closed. Contact-wide, so never repeated
+              blindly: after no answer, the ticket is read to see whether the
+              contact is blocked.
 
 Each write ends in one of these (write_status):
 
@@ -16,7 +21,8 @@ Each write ends in one of these (write_status):
     pending    not done yet, tried again on the next pass: their system was
                down or could not be reached
     held       refused before anything was sent (the contact is pending, the
-               ticket is not classified): a person fixes it and sends it again
+               ticket is not classified, notifications are off, another check
+               before sending): a person fixes it and sends it again
     uncertain  it may have happened: no answer came back, or the email was
                accepted and not saved. Never repeated by itself: a person
                checks the ticket, or the mailbox's Sent folder, and settles it
@@ -53,7 +59,7 @@ def _due(limit: int) -> list[dict]:
         JOIN drafts d ON d.id = w.draft_id
         JOIN tickets t ON t.id = d.ticket_id
         WHERE w.status = 'pending'
-          AND (w.kind = 'routing' OR EXISTS (
+          AND (w.kind IN ('routing', 'spam') OR EXISTS (
                 SELECT 1 FROM ticket_writes r
                 WHERE r.draft_id = w.draft_id AND r.kind = 'routing' AND r.status = 'sent'))
         ORDER BY w.created_at, w.id
@@ -139,7 +145,9 @@ def _reply(t2, w: dict) -> str:
             hint = {"contact pending": "approve or link the contact on the ticket page, "
                                        "then send it again",
                     "not classified": "classify the ticket, then send it again",
-                    "notifications off": "the customer's email notifications are off"
+                    "notifications off": "the customer's email notifications are off",
+                    "not attempted": "check the customer's email address and their "
+                                     "email setup, then send it again",
                     }.get(exc.email_not_tried, "")
             _set(w["id"], "held", error=f"not sent: {exc.email_not_tried}; {hint}")
             return "held"
@@ -157,6 +165,58 @@ def _reply(t2, w: dict) -> str:
     return "sent"
 
 
+SPAM_NOT_DONE = {
+    "ContactMarkSpam.ContactNotPending": "the sender is no longer a pending contact "
+                                         "(approved, linked or blocked since)",
+    "ContactMarkSpam.ProtectedTicket": "the sender has an Availo test ticket",
+    "ContactMarkSpam.NoClosedStatus": "their system has no closed status",
+}
+
+
+def _spam(t2, w: dict) -> str:
+    try:
+        r = t2.mark_spam(w["t2_ticket_id"])
+    except T2Error as exc:
+        if exc.maybe_applied:
+            return _spam_unknown(t2, w, exc)
+        if exc.refused:
+            why = SPAM_NOT_DONE.get(exc.code, str(exc))
+            _set(w["id"], "failed", error=f"not marked as spam: {why}")
+            log.warning("spam not marked", extra={"ticket": w["ticket_number"], "why": why})
+            return "failed"
+        return _retry(w, exc)
+    _spam_done(w, r.tickets_closed)
+    return "sent"
+
+
+def _spam_done(w: dict, closed: int | None) -> None:
+    _set(w["id"], "sent")
+    postgres.execute("UPDATE ticket_writes SET payload = payload || %s::jsonb WHERE id = %s",
+                     (f'{{"tickets_closed": {closed if closed is not None else "null"}}}',
+                      w["id"]))
+    postgres.execute("UPDATE tickets SET customer_contact_status = 'Blocked', "
+                     "last_synced_at = now() WHERE id = %s", (w["ticket_id"],))
+    log.info("marked as spam", extra={"ticket": w["ticket_number"], "closed": closed})
+
+
+def _spam_unknown(t2, w: dict, exc: T2Error) -> str:
+    """No answer came back: the sender's status on the ticket says whether it
+    happened. Blocked, it did; still pending, it did not, and it is tried
+    again; anything else, or no answer again, a person looks."""
+    try:
+        status = t2.get(w["t2_ticket_id"], articles=False).customer_status.lower()
+    except T2Error:
+        status = ""
+    if status == "blocked":
+        _spam_done(w, None)
+        return "sent"
+    if status == "pending":
+        return _retry(w, exc)
+    _set(w["id"], "uncertain", error=f"no answer came back, and the sender is "
+                                     f"{status or 'unknown'}: check the ticket ({exc})")
+    return "uncertain"
+
+
 def _retry(w: dict, exc: Exception) -> str:
     if w["attempts"] + 1 >= MAX_ATTEMPTS:
         _set(w["id"], "failed", error=f"gave up after {MAX_ATTEMPTS} tries: {exc}")
@@ -168,8 +228,8 @@ def _retry(w: dict, exc: Exception) -> str:
 
 
 def send_pending(*, limit: int = 20, t2=None) -> tuple[int, int]:
-    """One pass: the routings first, then the replies whose routing is
-    written (including any written a moment ago, in this pass). Returns
+    """One pass: the routings and spam first, then the replies whose routing
+    is written (including any written a moment ago, in this pass). Returns
     (written, not written). Never raises for one write."""
     if not _due(limit):
         return 0, 0
@@ -184,7 +244,7 @@ def send_pending(*, limit: int = 20, t2=None) -> tuple[int, int]:
         t2 = connect()
     sent = other = 0
     try:
-        for kind, write in (("routing", _routing), ("reply", _reply)):
+        for kind, write in (("routing", _routing), ("spam", _spam), ("reply", _reply)):
             for w in _due(limit):
                 if w["kind"] != kind:
                     continue

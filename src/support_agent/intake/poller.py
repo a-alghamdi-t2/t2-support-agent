@@ -41,6 +41,8 @@ def left_intake(ticket: Ticket, intake_product: str) -> str | None:
         return f"given the product {ticket.product}"
     if ticket.queue:
         return f"put in {ticket.queue}"
+    if ticket.assigned_staff:
+        return f"assigned to {ticket.assigned_staff}"
     if not ticket.requires_classification:
         return "classified"
     return None

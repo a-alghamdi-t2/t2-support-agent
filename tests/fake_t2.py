@@ -1,13 +1,16 @@
 """A stand-in for the T2 Ticketing System's TicketAPI, for tests.
 
-Follows what the API does (T2 Agent Ticket API, 20 October 2026): HTTP 200 with
+Follows what the API does (T2 Agent Ticket API, 22 October 2026): HTTP 200 with
 an Error object on refusal; times in Riyadh time; queue, type and subtype
 looked up under the target product; the product applied first; Conclusions
 at most 500 characters; history entries with "Queue changed from 'X' to 'Y'";
 the description listed as the first article when no message holds it;
 search needing at least one filter; a reply (IsVisibleForCustomer 1) emailed
-during the call, refused for a pending contact or an unclassified ticket, and
-nothing of the call saved when the email fails. Plugged into httpx with MockTransport.
+during the call, refused with its own code for a pending contact, an
+unclassified ticket, notifications off or another check before sending, and
+nothing of the call saved when the email fails; AssignedStaff; history with
+Sequence; ContactMarkSpam blocking a pending sender and closing their open
+tickets. Plugged into httpx with MockTransport.
 """
 
 from __future__ import annotations
@@ -44,20 +47,21 @@ calls: list[tuple[str, dict]] = []
 now = datetime(2026, 10, 19, 9, 0, 0)          # Riyadh time, naive like theirs
 fail_next: list[int] = []                      # HTTP status codes to answer with next
 subtypes_with_reasons = False                  # RiCH's catalog reasons on its subtypes
-email_codes = False                            # their separate refusal codes (A6), once live
-mail_fails: list[str] = []                     # "send" (not confirmed) or "persist", next reply
+mail_fails: list[str] = []                     # next reply: "not_attempted", "send" (not
+                                               # confirmed) or "persist"
 sent_mail: list[dict] = []
 _seq = 0
+_history_seq = 1000
 
 
 def reset() -> None:
-    global _seq, subtypes_with_reasons, email_codes
+    global _seq, subtypes_with_reasons
     T.clear()
     calls.clear()
     fail_next.clear()
     mail_fails.clear()
     sent_mail.clear()
-    subtypes_with_reasons = email_codes = False
+    subtypes_with_reasons = False
     _seq = 0
 
 
@@ -76,6 +80,7 @@ def add_email(title: str, body: str, email: str = "client@example.com",
               "product": "EMAIL", "queue": None, "status": "Open", "priority": "Low",
               "type": "Incident", "subtype": None, "reason": None, "requires": True,
               "assigned_staff": None, "email": email, "contact": "Pending",
+              "notifications": True,
               "created": at, "resolved": None,
               "description": body, "history": [],
               "threads": [{"id": str(uuid.uuid4()), "customer": True, "channel": "Email",
@@ -109,7 +114,10 @@ def _state_type(status: str) -> str:
 
 
 def _log(t: dict, action: str, details: str) -> None:
-    t["history"].append({"at": now, "action": action, "details": details, "by": USER})
+    global _history_seq
+    _history_seq += 1
+    t["history"].append({"at": now, "action": action, "details": details, "by": USER,
+                         "sequence": _history_seq})
 
 
 def handle(request: httpx.Request) -> httpx.Response:
@@ -187,6 +195,8 @@ def get(b: dict) -> dict:
         e = {"CreateTime": fmt(h["at"]), "Action": h["action"], "Details": h["details"],
              "FromQueue": "", "ToQueue": "", "FromState": "", "ToState": "", "Reason": "",
              "ResponsibleTeam": "", "By": h["by"]}
+        if h.get("sequence") is not None:
+            e["Sequence"] = h["sequence"]
         import re
         if m := re.search(r"Queue changed from '([^']*)' to '([^']*)'", h["details"]):
             e["FromQueue"], e["ToQueue"] = m.groups()
@@ -198,7 +208,7 @@ def get(b: dict) -> dict:
               {"Name": "Conclusions"} | ({"Value": t["reason"]} if t["reason"] else {})]
     p = PRODUCTS[t["product"]]
     return {"Ticket": [{
-        "TicketID": t["id"].lower(), "TicketNumber": t["number"], "Title": t["title"],
+        "AssignedStaff": t["assigned_staff"] or "", "TicketID": t["id"].lower(), "TicketNumber": t["number"], "Title": t["title"],
         "Queue": t["queue"] or "", "State": t["status"], "StateType": _state_type(t["status"]),
         "Type": t["type"], "Priority": t["priority"], "Service": p["name"],
         "ProductCode": t["product"], "SLA": "", "RequiresClassification": int(t["requires"]),
@@ -263,15 +273,22 @@ def update(b: dict) -> dict:
             return err("TicketUpdate.InvalidArticle", "Article.Subject is required.")
         classified = not t["requires"] or bool(ttype or subtype or conclusions is not None)
         if t["contact"] == "Pending":
-            return err("TicketUpdate.ContactPending" if email_codes else "TicketUpdate.EmailFailed",
-                       "Approve or link this pending contact before replying.")
+            return err("TicketUpdate.ContactPending", "No email was attempted. Approve or link "
+                       "this pending contact before retrying.")
         if not classified:
-            return err("TicketUpdate.NotClassified" if email_codes else "TicketUpdate.EmailFailed",
-                       "Classify this customer ticket before replying.")
+            return err("TicketUpdate.NotClassified",
+                       "No email was attempted. Classify this customer ticket before retrying.")
+        if not t["notifications"]:
+            return err("TicketUpdate.NotificationsDisabled", "No email was attempted. Customer "
+                       "notifications are disabled for this customer or test ticket.")
         failure = mail_fails.pop(0) if mail_fails else None
+        if failure == "not_attempted":
+            return err("TicketUpdate.EmailNotAttempted", "No email was attempted. Check the "
+                       "recipient, subject and server email setup before retrying.")
         if failure == "send":
             return err("TicketUpdate.EmailFailed",
-                       "Customer email could not be confirmed. No reply was recorded as sent.")
+                       "Customer email could not be confirmed and may already have reached the "
+                       "customer. Do not automatically retry.")
         message_id = f"<{uuid.uuid4()}@mail.t2.test>"
         sent_mail.append({"to": t["email"], "subject": f"[{t['number']}] {art['Subject']}",
                           "body": art["Body"], "message_id": message_id})
@@ -323,6 +340,29 @@ def update(b: dict) -> dict:
     return out
 
 
+def mark_spam(b: dict) -> dict:
+    if not (b.get("TicketID") or "").strip():
+        return err("ContactMarkSpam.InvalidTicketID", "TicketID is required.")
+    t = _find(b["TicketID"])
+    if not t:
+        return err("ContactMarkSpam.NotFound", "Ticket was not found.")
+    if t["contact"] != "Pending":
+        return err("ContactMarkSpam.ContactNotPending", "Only a pending contact can be marked "
+                   "as spam.")
+    closed = 0
+    for other in T.values():
+        if other["email"].lower() != t["email"].lower():
+            continue
+        other["contact"] = "Blocked"
+        if not _closed(other["status"]):
+            _log(other, "Status Changed",
+                 f"Status changed from '{other['status']}' to 'closed successful'.")
+            other.update(status="closed successful", resolved=now, requires=False)
+            closed += 1
+    return {"TicketID": t["id"].lower(), "CustomerID": "c0ffee00-0000-0000-0000-000000000001",
+            "ContactStatus": "Blocked", "TicketsClosed": closed}
+
+
 def create(b: dict) -> dict:
     tk, a = b.get("Ticket") or {}, b.get("Article") or {}
     code = _product(tk.get("Service") or "")
@@ -357,5 +397,5 @@ def lookups(b: dict) -> dict:
 
 
 OPS = {"TicketSearch": search, "TicketGet": get, "TicketUpdate": update,
-       "TicketCreate": create, "TicketLookupsGet": lookups}
+       "TicketCreate": create, "TicketLookupsGet": lookups, "ContactMarkSpam": mark_spam}
 TRANSPORT = httpx.MockTransport(handle)

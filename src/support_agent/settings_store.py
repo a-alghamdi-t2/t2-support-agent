@@ -94,6 +94,8 @@ FIELDS: tuple[Field, ...] = (
     Field("kb_tenants", "Indexes", "Knowledge base names", "Only for a product whose index "
           "is not named after its code (RICH -> rich): comma-separated CODE=index pairs.",
           "pairs"),
+    Field("kb_rerank", "Indexes", "Rerank knowledge base results",
+          "Off: faster searches, maybe less precise.", "bool"),
     Field("precedent_tenant", "Indexes", "Similar-tickets index", "The name in Qdrant."),
     Field("spam_tenant", "Indexes", "Spam index", "The name in Qdrant."),
 
@@ -109,6 +111,8 @@ FIELDS: tuple[Field, ...] = (
     # ---- email
     Field("smtp_host", "Email", "Mail server", ""),
     Field("smtp_port", "Email", "Mail server port", "", "int"),
+    Field("smtp_starttls", "Email", "Encrypt (STARTTLS)",
+          "Off only for a local mail catcher.", "bool"),
     Field("mail_username", "Email", "Mail user", ""),
     Field("mail_password", "Email", "Mail password", "", "secret"),
     Field("mail_from", "Email", "Sent from", ""),
@@ -127,7 +131,9 @@ ENV_ONLY = ("DATABASE_URL", "SESSION_SECRET", "API_KEY", "QDRANT_URL", "DOCLING_
 _CACHED = (
     ("support_agent.history.journey", "_client", {"groq_api_key", "journey_timeout"}),
     ("support_agent.history.journey", "_prompt", {"journey_language"}),
-    ("support_agent.knowledge.retriever", "_tenant", {"groq_api_key", "kb_tenants"}),
+    ("support_agent.knowledge.retriever", "_ragent", {"groq_api_key", "kb_rerank"}),
+    ("support_agent.knowledge.retriever", "_tenant", {"groq_api_key", "kb_tenants",
+                                                      "kb_rerank"}),
     ("support_agent.history.precedent", "_tenant", {"groq_api_key", "precedent_tenant",
                                                     "spam_tenant"}),
     ("support_agent.history.precedent", "_rag", {"groq_api_key"}),
