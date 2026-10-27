@@ -406,7 +406,12 @@ CREATE TABLE closed_tickets (
     requester_email  text,
     customer_id      text,
     customer_org     text,
+    -- The sender's contact status when the ticket was read: Blocked means
+    -- someone marked them as spam, which is what the spam index learns from.
+    contact_status   text,
     t2_created_at    timestamptz,
+    -- From the ticket's history: when it last went to a closed status. Their
+    -- TicketGet has no close time of its own.
     t2_closed_at     timestamptz,
     solution_minutes integer,
     article_count    integer NOT NULL,

@@ -35,6 +35,13 @@ is a complaint, a question about prices, or someone asking to become a
 customer. When `spam` is true, still choose the most likely product, and say
 why it is spam in `spam_reason`.
 
+SPAM CHECK, when there is one, compares this email with the ones the team
+marked as spam before, and says how much spam and real mail its company domain
+has sent. "Looks like spam" is strong evidence: a near copy of mail the team
+already threw away. Still read the email: a real customer's message that only
+resembles spam is not spam. SENDER HISTORY lists earlier spam from this
+address as "spam".
+
 ## Fields
 
 Write everything in English, whatever language the email is in.

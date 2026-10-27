@@ -21,6 +21,7 @@ import time
 
 from support_agent import llm, options
 from support_agent.config import get_settings
+from support_agent.db import postgres
 from support_agent.intake import context as ticket_context
 from support_agent.logging import get_logger
 from support_agent.orchestrator import product as product_step
@@ -56,9 +57,13 @@ def draft(ticket_id: int, *, product: str | None = None,
                     "redraft_for": product, "replaces": replaces}]
     base = {"model": s.groq_model, "prompt_ver": PROMPT_VER, "replaces_draft_id": replaces}
 
+    spam_verdict = None
     try:
         if product is None:
-            choice, chosen = product_step.run(context, trace)
+            spam_verdict = _spam_check(ticket_id, trace)
+            choice, chosen = product_step.run(context, trace,
+                                              spam_check=spam_verdict.block() if spam_verdict
+                                              else None)
             code, name, sure = chosen.code, chosen.name, chosen.sure
             why, summary = choice.reason, choice.summary
             corrections = list(chosen.corrections)
@@ -69,7 +74,8 @@ def draft(ticket_id: int, *, product: str | None = None,
                 values = {**base, "action": Action.SPAM.value, "product": None,
                           "product_sure": True, "summary": summary,
                           "reasoning": choice.spam_reason or choice.reason}
-                return _save(ticket_id, values, started, trace, corrections=corrections)
+                return _save(ticket_id, values, started, trace, corrections=corrections,
+                             spam_verdict=spam_verdict)
         else:
             o = options.product(product)
             if o is None or o.removed:
@@ -84,7 +90,8 @@ def draft(ticket_id: int, *, product: str | None = None,
                       "reasoning": why,
                       "note": f"{name} has no queues in the ticket system yet: "
                               "choose where it goes by hand."}
-            return _save(ticket_id, values, started, trace, corrections=corrections)
+            return _save(ticket_id, values, started, trace, corrections=corrections,
+                         spam_verdict=spam_verdict)
 
         decision, retrievals, more = route_step.run(context, code, name, why, trace)
         corrections += more
@@ -111,20 +118,44 @@ def draft(ticket_id: int, *, product: str | None = None,
     }
     return _save(ticket_id, values, started, trace, corrections=corrections,
                  retrievals=retrievals, held_reply=decision._held_reply,
+                 spam_verdict=spam_verdict,
                  urgent_reason=(decision.urgent_reason or "urgent") if decision.urgent
                  else None)
 
 
+def _spam_check(ticket_id: int, trace: list):
+    """The spam check against what the team marked as spam before. Never
+    raises; None when it could not run."""
+    try:
+        from support_agent.history import spam
+
+        row = postgres.query_one("SELECT search_text, requester_email FROM tickets "
+                                 "WHERE id = %s", (ticket_id,))
+        v = spam.check((row or {}).get("search_text"), (row or {}).get("requester_email"))
+        trace.append({"step": "spam_check", "checked": v.checked, "flagged": v.flagged,
+                      "score": round(v.score, 3), "real_score": round(v.real_score, 3),
+                      "reason": v.reason or None})
+        return v
+    except Exception:
+        log.exception("spam check failed", extra={"ticket": ticket_id})
+        return None
+
+
 def _save(ticket_id: int, values: dict, started: float, trace: list, *,
           corrections: list[str], retrievals=None, held_reply=None,
-          urgent_reason=None) -> int:
+          urgent_reason=None, spam_verdict=None) -> int:
     values["latency_ms"] = int((time.perf_counter() - started) * 1000)
     trace.append({"step": "done", "ms": values["latency_ms"],
                   "tokens": _tokens(trace)})
     draft_id = store.save(ticket_id, values,
                           evidence=store.evidence_json(retrievals or [], corrections, held_reply),
                           trace=trace, urgent_reason=urgent_reason)
+    from support_agent.history import similar, spam
     from support_agent.notify import urgent           # keywords, and the alert email
+    if spam_verdict is not None:
+        spam.save(draft_id, spam_verdict)
+    if values.get("action") != "spam":
+        similar.attach(draft_id)                      # how the team handled ones like it
     urgent.check(draft_id)
     return draft_id
 

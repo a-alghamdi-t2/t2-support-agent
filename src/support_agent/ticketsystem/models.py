@@ -37,6 +37,9 @@ class Article:
     created: datetime | None
     message_id: str
     attachments: tuple[Attachment, ...] = ()
+    sender_type: str = ""
+    """Their own word: "customer", "agent" (staff on their page), "T2Agent"
+    (written through the API: our notes and replies), "system"."""
 
     @property
     def is_description(self) -> bool:

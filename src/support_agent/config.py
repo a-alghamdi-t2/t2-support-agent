@@ -119,6 +119,10 @@ class Settings(BaseSettings):
     """Comma-separated addresses for the weekly report. Empty: the run still
     happens and the report is kept in weekly_runs, but nobody is emailed."""
 
+    history_first_days: int = 180
+    """How far back the first weekly run reads closed tickets. Later runs
+    start where the last finished one stopped."""
+
     history_candidate_pool: int = 10
     """Candidates the reranker scores in the similar-tickets and spam searches.
     The reranker runs on CPU at about a second per candidate, so this is most

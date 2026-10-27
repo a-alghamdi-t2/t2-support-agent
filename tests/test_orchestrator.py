@@ -44,7 +44,7 @@ class Script:
             return "subtype"
         return "route"
 
-    def __call__(self, messages, *, tools=None, json_mode=False, temperature=0.0):
+    def __call__(self, messages, *, tools=None, json_mode=False, temperature=0.0, **_):
         step = self.step(messages)
         self.calls.append((step, json_mode, bool(tools)))
         self.users.setdefault(step, messages[1]["content"])

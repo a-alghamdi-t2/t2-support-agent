@@ -128,15 +128,13 @@ ENV_ONLY = ("DATABASE_URL", "SESSION_SECRET", "API_KEY", "QDRANT_URL", "DOCLING_
 
 # Built once per process from settings these depend on; rebuilt after a save
 # that changes any of them.
+_RAG = {"groq_api_key", "kb_rerank", "kb_candidate_pool", "kb_top_k",
+        "kb_tool_repair_attempts", "kb_max_rounds", "kb_embed_timeout"}
 _CACHED = (
-    ("support_agent.history.journey", "_client", {"groq_api_key", "journey_timeout"}),
     ("support_agent.history.journey", "_prompt", {"journey_language"}),
-    ("support_agent.knowledge.retriever", "_ragent", {"groq_api_key", "kb_rerank"}),
-    ("support_agent.knowledge.retriever", "_tenant", {"groq_api_key", "kb_tenants",
-                                                      "kb_rerank"}),
-    ("support_agent.history.precedent", "_tenant", {"groq_api_key", "precedent_tenant",
-                                                    "spam_tenant"}),
-    ("support_agent.history.precedent", "_rag", {"groq_api_key"}),
+    ("support_agent.knowledge.retriever", "rag_settings", _RAG),
+    ("support_agent.knowledge.retriever", "_ragent", _RAG),
+    ("support_agent.knowledge.retriever", "_tenant", _RAG | {"kb_tenants"}),
 )
 
 

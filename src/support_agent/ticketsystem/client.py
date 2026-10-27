@@ -426,6 +426,7 @@ class T2Client:
             sender=_s(a, "From"), to=_s(a, "To"), cc=_s(a, "Cc"), subject=_s(a, "Subject"),
             body=_s(a, "Body").replace("\r\n", "\n"),
             created=self._parse_time(a.get("CreateTime")), message_id=_s(a, "MessageID"),
+            sender_type=_s(a, "SenderType"),
             attachments=tuple(Attachment(
                 id=_s(x, "AttachmentID").lower(), filename=_s(x, "Filename"),
                 content_type=_s(x, "ContentType"),

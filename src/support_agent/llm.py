@@ -82,12 +82,16 @@ def _groq():
 
 
 def complete(messages: list[dict[str, Any]], *, tools: list[dict] | None = None,
-             json_mode: bool = False, temperature: float = 0.0) -> Reply:
-    """One call to the model."""
+             json_mode: bool = False, temperature: float = 0.0,
+             model: str | None = None, max_tokens: int | None = None) -> Reply:
+    """One call to the model: the agent's (GROQ_MODEL) unless another is
+    named, as the journeys do."""
     from groq import APIError, BadRequestError
 
-    kwargs: dict[str, Any] = {"model": get_settings().groq_model, "messages": messages,
-                              "temperature": temperature}
+    kwargs: dict[str, Any] = {"model": model or get_settings().groq_model,
+                              "messages": messages, "temperature": temperature}
+    if max_tokens:
+        kwargs["max_tokens"] = max_tokens
     if tools:
         kwargs["tools"] = tools
         kwargs["tool_choice"] = "auto"

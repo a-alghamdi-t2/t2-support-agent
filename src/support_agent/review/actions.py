@@ -34,6 +34,7 @@ from support_agent import options
 from support_agent.config import get_settings
 from support_agent.db import audit, postgres
 from support_agent.logging import get_logger
+from support_agent.history import similar as similar_tickets
 from support_agent.review import note as ticket_note
 from support_agent.review import signatures
 
@@ -273,7 +274,8 @@ def approve(draft_id: int, *, who: str, send: bool = False, changes: dict | None
                               reviewer=who, reply=reply_state, changes=diff,
                               urgent_reason=urgent["agent_reason"] if urgent else None,
                               comment=comment, reply_text=signed,
-                              passages=ticket_note.sources(row["evidence"]))
+                              passages=ticket_note.sources(row["evidence"]),
+                              similar=similar_tickets.for_draft(draft_id))
     writes = [("routing", {
         "product": final["product"], "queue": final.get("queue"), "type": final.get("type"),
         "subtype": final.get("subtype"), "conclusions": final.get("conclusions"),

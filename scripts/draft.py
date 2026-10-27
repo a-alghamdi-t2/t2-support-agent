@@ -102,6 +102,30 @@ def show(draft_id: int, *, steps: bool = False) -> None:
         for e in postgres.query("SELECT to_address, status FROM urgent_emails "
                                 "WHERE draft_id = %s ORDER BY id", (draft_id,)):
             print(f"  alerted      {e['to_address']}: {e['status']}")
+    from support_agent.history import similar, spam
+    sp = spam.for_draft(draft_id)
+    if sp:
+        verdict = f"LOOKS LIKE SPAM: {sp['reason']}" if sp["flagged"] else (
+            f"not spam (closest spam {sp['score']:.2f})")
+        print(f"  spam check   {verdict}")
+        if sp["sender_spam"] or sp["sender_real"]:
+            print(f"               sender's domain: {sp['sender_spam']} spam, "
+                  f"{sp['sender_real']} real before")
+    status = d.get("similar_status")
+    rows = similar.for_draft(draft_id)
+    if rows:
+        for r in rows:
+            path = " -> ".join(r["path"]) if r["path"] else (r["queue"] or "-")
+            print(f"  similar {r['rank']}    {r['ticket_number']}  ({r['score']:.2f})  "
+                  f"{(r['title'] or '')[:50]!r}")
+            print(f"               {r['product_name'] or '-'}: {path}")
+            if steps and r["journey"]:
+                print("               " + textwrap.fill(r["journey"], 80,
+                                                         subsequent_indent=" " * 15))
+    elif status and status != "found":
+        print("  similar      " + {"none": "nothing similar closed before",
+                                   "no_index": "no closed tickets indexed yet",
+                                   "failed": "the search failed"}.get(status, status))
     reply = d["reply_body"] or ((ev.get("held_reply") or {}).get("body"))
     if reply:
         label = "reply" if d["reply_body"] else (

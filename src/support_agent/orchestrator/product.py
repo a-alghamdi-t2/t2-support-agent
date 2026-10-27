@@ -67,9 +67,12 @@ def sender_history(context: TicketContext) -> str | None:
           AND (lower(t.requester_email) = %(email)s
                OR (%(by_domain)s AND split_part(lower(t.requester_email), '@', 2) = %(domain)s))
         UNION ALL
-        SELECT lower(c.requester_email) = %(email)s, upper(c.product_code)
+        SELECT lower(c.requester_email) = %(email)s,
+               CASE WHEN c.contact_status = 'Blocked' THEN 'spam'
+                    ELSE upper(c.product_code) END
         FROM closed_tickets c
-        WHERE upper(coalesce(c.product_code, '')) NOT IN ('', %(intake)s)
+        WHERE (c.contact_status = 'Blocked'
+               OR upper(coalesce(c.product_code, '')) NOT IN ('', %(intake)s))
           AND (lower(c.requester_email) = %(email)s
                OR (%(by_domain)s AND split_part(lower(c.requester_email), '@', 2) = %(domain)s))
         """,
@@ -93,15 +96,19 @@ def sender_history(context: TicketContext) -> str | None:
     return "\n".join(lines) if len(lines) > 1 else None
 
 
-def run(context: TicketContext, trace: list
+def run(context: TicketContext, trace: list, *, spam_check: str | None = None
         ) -> tuple[ProductChoice, validate.ProductResult]:
     """The product, checked. One retry when the model names a product that is
-    not offered; raises llm.LLMError when the second is no better."""
+    not offered; raises llm.LLMError when the second is no better.
+    spam_check: what history/spam.py found, when it has something to say."""
     user = context.render()
     history = sender_history(context)
     if history:
         user += "\n\n" + history
+    if spam_check:
+        user += "\n\n" + spam_check
     trace.append({"step": "product.input", "sender_history": history,
+                  "spam_check": spam_check,
                   "products": [o.product for o in options.products()]})
 
     messages = [{"role": "system", "content": _prompt() + "\n" + _products_block()},

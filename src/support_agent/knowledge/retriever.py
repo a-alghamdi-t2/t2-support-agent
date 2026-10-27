@@ -53,13 +53,13 @@ def unavailable(code: str) -> str | None:
 
 
 @lru_cache(maxsize=1)
-def _ragent() -> Any:
-    """The RAGent2 client. Built once; it caches models."""
+def rag_settings() -> Any:
+    """RAGent2's settings, built once from ours. Shared by the knowledge bases
+    and the history's indexes (similar tickets, spam)."""
     s = get_settings()
     if not s.groq_api_key:
         raise KnowledgeUnavailable("GROQ_API_KEY is not set")
     try:
-        from ragent2 import Ragent
         from ragent2.config import Settings as RagSettings
     except ImportError as exc:
         raise KnowledgeUnavailable(
@@ -79,7 +79,16 @@ def _ragent() -> Any:
     # Only what is set: RAGent2 refuses None for its text settings and has its
     # own defaults for them. Searching needs no Docling; indexing does, and
     # documents.py does not index without DOCLING_URL.
-    return Ragent(settings=RagSettings(**{k: v for k, v in values.items() if v is not None}))
+    return RagSettings(**{k: v for k, v in values.items() if v is not None})
+
+
+@lru_cache(maxsize=1)
+def _ragent() -> Any:
+    """The RAGent2 client. Built once; it caches models."""
+    settings = rag_settings()
+    from ragent2 import Ragent
+
+    return Ragent(settings=settings)
 
 
 @lru_cache(maxsize=32)

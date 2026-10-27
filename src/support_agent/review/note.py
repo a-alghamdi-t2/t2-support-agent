@@ -3,7 +3,8 @@
 Staff see it on the ticket page; the customer never does. It says who
 approved it, what the customer asked, the classification, why the agent chose
 the queue and the rest, the knowledge base passages it found (file, section
-and the passage, so the reply can be checked against its source), what the
+and the passage, so the reply can be checked against its source), the closed
+tickets most like this one and how they went, what the
 reviewer changed, and the suggested reply: sent, to check and send (Approve &
 Draft), or kept for the team on a routing.
 
@@ -78,9 +79,21 @@ def _sources_section(passages: list[dict]) -> list[str]:
     return rows
 
 
+def _similar_section(rows: list[dict]) -> list[str]:
+    out = ["SIMILAR CLOSED TICKETS"]
+    for r in rows:
+        path = " -> ".join(r.get("path") or []) or (r.get("queue") or "-")
+        out += ["", f"  {r['rank']}. {r['ticket_number']}: {(r.get('title') or '').strip()}",
+                f"     {r.get('product_name') or r.get('product_code') or '-'}: {path}"]
+        if (r.get("journey") or "").strip():
+            out.append(f"     {r['journey'].strip()}")
+    return out
+
+
 def render(*, final: dict, product_name: str, reviewer: str, reply: str,
            changes: dict, urgent_reason: str | None = None, comment: str | None = None,
-           reply_text: str | None = None, passages: list[dict] | None = None) -> str:
+           reply_text: str | None = None, passages: list[dict] | None = None,
+           similar: list[dict] | None = None) -> str:
     """The note body.
 
     final        the fields as approved
@@ -117,6 +130,9 @@ def render(*, final: dict, product_name: str, reviewer: str, reply: str,
 
     if passages:
         sections.append(_sources_section(passages))
+
+    if similar:
+        sections.append(_similar_section(similar))
 
     if changes:
         rows = ["CHANGED BY THE REVIEWER"]

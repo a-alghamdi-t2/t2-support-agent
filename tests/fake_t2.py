@@ -173,7 +173,9 @@ def get(b: dict) -> dict:
     articles = []
     if b.get("AllArticles") == 1:
         threads = sorted(t["threads"], key=lambda a: a["at"])
-        articles = [{"ArticleID": a["id"], "SenderType": "customer" if a["customer"] else "agent",
+        articles = [{"ArticleID": a["id"],
+                     # Like theirs: every staff article is "agent", the API's too.
+                     "SenderType": "customer" if a["customer"] else "agent",
                      "CommunicationChannelID": "1" if a["channel"] == "Email" else "2",
                      "IsVisibleForCustomer": "0" if a["internal"] else "1",
                      "From": a["from"] or "", "To": "", "Cc": "",
@@ -325,7 +327,7 @@ def update(b: dict) -> dict:
     if art:
         art_id = str(uuid.uuid4())
         internal = art.get("IsVisibleForCustomer") != 1
-        t["threads"].append({"id": art_id, "customer": False,
+        t["threads"].append({"id": art_id, "customer": False, "api": True,
                              "channel": "Email" if send else "T2AgentApi",
                              "internal": internal, "from": art.get("From"),
                              "subject": art.get("Subject"), "body": art["Body"].strip(),
@@ -338,6 +340,46 @@ def update(b: dict) -> dict:
         if message_id:
             out["MessageID"] = message_id
     return out
+
+
+def staff(tid: str, body: str, *, internal: bool, by: str = "omar@t2.sa",
+          minutes: int = 0) -> None:
+    """A staff member writing on their ticket page: a note or a reply."""
+    t = T[tid]
+    t["threads"].append({"id": str(uuid.uuid4()), "customer": False, "channel": "Email",
+                         "internal": internal, "from": by, "subject": t["title"],
+                         "body": body, "at": now + timedelta(minutes=minutes)})
+
+
+def customer(tid: str, body: str, *, minutes: int = 0) -> None:
+    """The customer writing again."""
+    t = T[tid]
+    t["threads"].append({"id": str(uuid.uuid4()), "customer": True, "channel": "Email",
+                         "internal": False, "from": t["email"], "subject": "Re: " + t["title"],
+                         "body": body, "at": now + timedelta(minutes=minutes)})
+
+
+def reassign(tid: str, queue: str, *, reason: str = "", team: str = "",
+             minutes: int = 0) -> None:
+    """A person moving the ticket on their page, with the reason they wrote."""
+    t = T[tid]
+    _log(t, "Reassigned", f"Queue changed from '{t['queue'] or ''}' to '{queue}'.")
+    t["history"][-1].update(at=now + timedelta(minutes=minutes), by="omar@t2.sa",
+                            extra={"Reason": reason, "ResponsibleTeam": team})
+    t["queue"] = queue
+    # Their page also writes the justification as a note, with no sender.
+    t["threads"].append({"id": str(uuid.uuid4()), "customer": False, "channel": "Note",
+                         "internal": True, "from": "", "subject": t["title"],
+                         "body": f"Ticket re-assigned. Justification: {reason} ",
+                         "at": now + timedelta(minutes=minutes)})
+
+
+def close(tid: str, *, minutes: int = 0, status: str = "closed successful") -> None:
+    t = T[tid]
+    at = now + timedelta(minutes=minutes)
+    _log(t, "Status Changed", f"Status changed from '{t['status']}' to '{status}'.")
+    t["history"][-1].update(at=at, by="omar@t2.sa")
+    t.update(status=status, resolved=at)
 
 
 def mark_spam(b: dict) -> dict:

@@ -14,3 +14,4 @@ seed-*.ps1
 kb/
 data/
 logs/
+env.example
